@@ -68,15 +68,12 @@ class Pricing:
 
 @dataclass(frozen=True)
 class Thresholds:
-    run_burst_gap_seconds: int = 120
-    max_sane_query_chars: int = 300
     head_templates_export: int = 200
 
 
 @dataclass(frozen=True)
 class AnomalySettings:
     max_excerpt_chars: int = 2000
-    context_lines: int = 3
     default_sample: int = 5
     max_payload_rows: int = 200
 
