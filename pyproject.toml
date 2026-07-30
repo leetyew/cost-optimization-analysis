@@ -1,0 +1,31 @@
+[project]
+name = "coa"
+version = "0.1.0"
+description = "Web-search cost optimization analysis for the merchant fraud-screening pipeline"
+requires-python = ">=3.13"
+# Deliberately minimal. Everything else (pandas, sklearn, sentence-transformers,
+# dnspython, ...) is deferred behind a measured trigger — see PLAN.md deviations.
+dependencies = ["pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+coa = "coa.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

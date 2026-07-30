@@ -1,0 +1,59 @@
+# Configuration for the cost-optimization analysis pipeline.
+# Every pricing constant is null until an operator fills it from the billing
+# dashboard. Reports print an UNVERIFIED PRICING banner while any is null and
+# fall back to call-count-based relative shares, which need no prices at all.
+
+paths:
+  # Root of the other team's exported data. Expected to contain logs/, output/,
+  # input/ — as directories or .zip archives, both are handled.
+  data_root: data/cost_optimization
+  db: coa.sqlite
+  reports: reports
+  # template -> archetype grouping, hand-maintained from the head-template export.
+  archetype_groups: archetype_groups.csv
+
+pricing:
+  # Per-call fee is believed to apply ONLY to `action type - search`.
+  # open_page / find_in_page consume tokens but no per-call fee. VERIFY THIS.
+  fee_per_1k_search_calls: null
+  input_per_mtok: null
+  output_per_mtok: null
+  # Whether a flat token block is billed per search's returned content.
+  search_content_flat_tokens: null
+  batch_discount: null
+
+thresholds:
+  # Run attribution: gap (seconds) between consecutive search calls that splits
+  # one merchant's calls into separate runs. The report emits a gap histogram so
+  # this can be tuned against reality rather than guessed.
+  run_burst_gap_seconds: 120
+  # A queries[] item longer than this marks the parse as `heuristic` rather than
+  # `clean` — real queries are short, long items mean the split went wrong.
+  max_sane_query_chars: 300
+  # Head-template export size for the hand-grouping workflow.
+  head_templates_export: 200
+
+anomalies:
+  # Raw excerpts stored per anomaly row, and context lines kept either side.
+  max_excerpt_chars: 2000
+  context_lines: 3
+  # Default sample count for `coa anomalies show CODE`. Kept small: the output is
+  # meant to be copy-pasted back into a Claude Code session, not skimmed.
+  default_sample: 5
+
+# Lines matching any of these are treated as boilerplate noise, so they do NOT
+# trigger the "possible wrapped action line" heuristic.
+#
+# This is the main tuning lever for POSSIBLE_WRAPPED_ACTION. Any recurring
+# boilerplate line that can follow an action line must be listed here, or every
+# occurrence is reported as a suspected wrapped continuation and the signal drowns
+# in false positives. When that code fires in bulk on real data, read the samples
+# and add the pattern here rather than loosening the heuristic.
+#
+# The last two entries match the synthetic fixture boilerplate; replace them with
+# the real log's recurring lines once those are known.
+noise_patterns:
+  - '^\s*$'
+  - '^\s*[-=]{3,}\s*$'
+  - '^loading configuration\b'
+  - '^cache warm\b'

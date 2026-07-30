@@ -1,0 +1,23 @@
+# Analysis artifacts contain merchant PII (names, emails, phones, addresses,
+# owner names) by design. Never commit them.
+#
+# Leading slash matters: these are anchored to the repo root so they do NOT
+# match tests/fixtures/data/, which is synthetic and IS committed for
+# determinism. Git cannot re-include a path under an excluded directory, so an
+# unanchored `data/` here would silently drop the fixture tree from version
+# control.
+/coa.sqlite*
+/reports/
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# CodeGraph index — machine-local, rebuilt by `codegraph init -i`
+/.codegraph/
