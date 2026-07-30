@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from coa.anomalies import AnomalyRecorder
+from coa.anomalies import AnomalyRecorder, samples
 from coa.config import Config
 from coa.db import connect, mark_ingested
 from coa.logs import ingest_log, parse_action_line, reparse
@@ -421,8 +421,6 @@ def test_anomaly_payload_is_capped_but_counts_stay_exact(conn: sqlite3.Connectio
 
 def test_capped_samples_still_return_payload_bearing_rows(conn: sqlite3.Connection) -> None:
     """`coa anomalies show` stays useful after capping kicks in."""
-    from coa.anomalies import samples
-
     rec = AnomalyRecorder(conn, "logs", max_payload_rows=2)
     for i in range(30):
         rec.record("ORPHAN_ACTION", src_file="a.log", src_line=i, context=["ctx"])

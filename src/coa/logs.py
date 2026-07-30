@@ -370,7 +370,7 @@ def ingest_log(
             "FILE_UNRECOGNIZED",
             src_file=src_name,
             src_line=1,
-            context=[f"   {ln}" for ln in list(lines)[:5]],
+            context=[f"   {ln}" for ln in lines[:5]],
             detail=(
                 f"{stats['lines']} lines, none matched the timestamped-line pattern. "
                 "The log format almost certainly differs from what TIMESTAMPED_RE "
