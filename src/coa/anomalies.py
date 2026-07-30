@@ -21,6 +21,8 @@ import sqlite3
 from collections.abc import Iterable
 
 DEFAULT_MAX_EXCERPT = 2000
+# Per-code cap on rows that carry excerpt/context payload. See record().
+DEFAULT_MAX_PAYLOAD_ROWS = 200
 
 
 class AnomalyRecorder:
@@ -36,10 +38,12 @@ class AnomalyRecorder:
         conn: sqlite3.Connection,
         stage: str,
         max_excerpt: int = DEFAULT_MAX_EXCERPT,
+        max_payload_rows: int = DEFAULT_MAX_PAYLOAD_ROWS,
     ) -> None:
         self.conn = conn
         self.stage = stage
         self.max_excerpt = max_excerpt
+        self.max_payload_rows = max_payload_rows
         self._buf: list[tuple] = []
         self.counts: dict[str, int] = {}
 
@@ -56,6 +60,18 @@ class AnomalyRecorder:
     ) -> None:
         """Log one anomaly. Never raises, never drops the underlying record."""
         self.counts[code] = self.counts.get(code, 0) + 1
+
+        # Drop the bulky payload (excerpt + context) past the first N of each code,
+        # keeping the row itself. If a core assumption turns out wrong on real data
+        # a single code can fire once per line, and full context on millions of rows
+        # would bloat the DB exactly when the feedback channel matters most. Rows
+        # are still written, so counts stay exact and forget_file/--force stay
+        # correct; the retained samples are the earliest ones, which is what
+        # `coa anomalies show` surfaces anyway.
+        if self.counts[code] > self.max_payload_rows:
+            raw_excerpt = None
+            context = None
+
         self._buf.append(
             (
                 self.stage,
@@ -133,7 +149,7 @@ def samples(conn: sqlite3.Connection, code: str, limit: int) -> list[sqlite3.Row
         SELECT * FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY src_file ORDER BY id) AS rn
             FROM anomalies WHERE code = ?
-        ) ORDER BY rn, id LIMIT ?
+        ) ORDER BY (context IS NULL AND raw_excerpt IS NULL), rn, id LIMIT ?
         """,
         (code, limit),
     ).fetchall()

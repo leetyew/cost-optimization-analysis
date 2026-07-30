@@ -40,6 +40,10 @@ anomalies:
   # Default sample count for `coa anomalies show CODE`. Kept small: the output is
   # meant to be copy-pasted back into a Claude Code session, not skimmed.
   default_sample: 5
+  # Rows per code that keep their excerpt/context payload. Past this the row is
+  # still written (counts stay exact) but without the bulky text, so a wrong
+  # assumption firing once per line cannot bloat the DB.
+  max_payload_rows: 200
 
 # Lines matching any of these are treated as boilerplate noise, so they do NOT
 # trigger the "possible wrapped action line" heuristic.

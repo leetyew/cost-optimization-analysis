@@ -58,6 +58,7 @@ class AnomalySettings:
     max_excerpt_chars: int = 2000
     context_lines: int = 3
     default_sample: int = 5
+    max_payload_rows: int = 200
 
 
 @dataclass(frozen=True)

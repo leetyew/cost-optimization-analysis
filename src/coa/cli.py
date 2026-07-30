@@ -16,6 +16,7 @@ Subcommands, in the order they are meant to be run:
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 import zipfile
 from collections import Counter
@@ -71,7 +72,9 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
                     skipped += 1
                     continue
                 forget_file(conn, src_name)
-            rec = anom.AnomalyRecorder(conn, "logs", cfg.anomalies.max_excerpt_chars)
+            rec = anom.AnomalyRecorder(
+                conn, "logs", cfg.anomalies.max_excerpt_chars, cfg.anomalies.max_payload_rows
+            )
             try:
                 stats = ingest_log(conn, rec, src_name, lines, cfg)
                 rec.flush()
@@ -89,7 +92,7 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
 
-def _ingest_summary(conn, totals: Counter, seen: int, skipped: int) -> str:
+def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skipped: int) -> str:
     """One-screen data-quality report. Non-zero anomalies are the expected state."""
     strict, orphan = totals["strict"], totals["orphan"]
     paired = strict + orphan
@@ -120,7 +123,9 @@ def cmd_reparse(args: argparse.Namespace, cfg: Config) -> int:
     conn = connect(cfg.db)
     try:
         conn.execute("DELETE FROM anomalies WHERE stage = 'reparse'")
-        rec = anom.AnomalyRecorder(conn, "reparse", cfg.anomalies.max_excerpt_chars)
+        rec = anom.AnomalyRecorder(
+            conn, "reparse", cfg.anomalies.max_excerpt_chars, cfg.anomalies.max_payload_rows
+        )
         stats = reparse(conn, rec, cfg)
         rec.flush()
         conn.commit()

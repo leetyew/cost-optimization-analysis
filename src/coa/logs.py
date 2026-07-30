@@ -55,6 +55,10 @@ REPLACEMENT_CHAR = "�"
 # the original spelling always survives in raw_action_line.
 KNOWN_ACTION_TYPES = {"search", "open_page", "find_in_page"}
 
+# Below this many lines a file is too small for "zero timestamped lines" to mean
+# anything — a short fragment legitimately might not contain one.
+MIN_LINES_FOR_FORMAT_CHECK = 10
+
 
 @dataclass
 class ParsedAction:
@@ -280,16 +284,19 @@ def ingest_log(
             pairing = "strict" if pending_ws else "orphan"
             stats[pairing] += 1
             stats[f"conf_{pa.parse_conf}"] += 1
-            se10, ts, ws_id = pending_ws if pending_ws else (None, None, None)
+            # Distinct names: se10/ts are already bound by the timestamped branch
+            # above, and reusing them here reads as shadowing even though that
+            # branch continues.
+            call_se10, call_ts, call_ws_id = pending_ws if pending_ws else (None, None, None)
 
             cur = conn.execute(
                 "INSERT INTO search_calls (se10, ts, ws_id, action_type, raw_action_line, "
                 "query_raw, queries_raw, queries_json, url, pattern, pairing, parse_conf, "
                 "src_file, src_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    se10,
-                    ts,
-                    ws_id,
+                    call_se10,
+                    call_ts,
+                    call_ws_id,
                     pa.action_type,
                     raw,
                     pa.query_raw,
@@ -304,7 +311,7 @@ def ingest_log(
                 ),
             )
             call_id = cur.lastrowid
-            _insert_queries(conn, call_id, se10, pa)
+            _insert_queries(conn, call_id, call_se10, pa)
 
             if pairing == "orphan":
                 rec.record(
@@ -317,7 +324,7 @@ def ingest_log(
             for code, detail in pa.notes:
                 rec.record(
                     code,
-                    se10=se10,
+                    se10=call_se10,
                     src_file=src_name,
                     src_line=line_no,
                     raw_excerpt=raw,
@@ -351,6 +358,26 @@ def ingest_log(
 
     # Pairing loss KPI: how many web_search_call lines never got an adjacent action.
     stats["pairing_delta"] = stats["web_search_call"] - stats["strict"]
+
+    # Format sanity check. If the real log's timestamp/module/se10 shape differs at
+    # all from what TIMESTAMPED_RE assumes, nothing classifies, every action becomes
+    # an orphan with se10 NULL, and the entire analysis is silently unattributable.
+    # Worse, it presents as ORPHAN_ACTION — which PLAN.md calls an EXPECTED
+    # condition — so it reads as pairing loss and the wrong thing gets patched.
+    # Flag it as its own code so that misdiagnosis cannot happen.
+    if stats["lines"] >= MIN_LINES_FOR_FORMAT_CHECK and stats["timestamped"] == 0:
+        rec.record(
+            "FILE_UNRECOGNIZED",
+            src_file=src_name,
+            src_line=1,
+            context=[f"   {ln}" for ln in list(lines)[:5]],
+            detail=(
+                f"{stats['lines']} lines, none matched the timestamped-line pattern. "
+                "The log format almost certainly differs from what TIMESTAMPED_RE "
+                "assumes; merchant identity cannot be recovered until it is fixed. "
+                "Do NOT read the orphan count on this file as pairing loss."
+            ),
+        )
     return stats
 
 

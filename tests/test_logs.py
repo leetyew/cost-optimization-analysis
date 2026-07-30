@@ -373,3 +373,59 @@ def test_degenerate_action_line_with_no_fields_is_kept(conn: sqlite3.Connection)
     _, rec = run(conn, [WS, "action type - "])
     assert len(calls(conn)) == 1
     assert rec.counts["ACTION_UNPARSEABLE"] == 1
+
+
+def test_unrecognized_log_format_is_flagged_not_read_as_pairing_loss(
+    conn: sqlite3.Connection,
+) -> None:
+    """A format mismatch must not masquerade as ORPHAN_ACTION.
+
+    If TIMESTAMPED_RE does not match the real log, every action orphans with
+    se10 NULL and the whole analysis is unattributable — but ORPHAN_ACTION is a
+    documented EXPECTED condition, so without its own code the operator would
+    diagnose the pairing rule instead of the regex.
+    """
+    lines = [
+        "2026-07-30T10:00:01.000 | INFO | app-search | [SE1000000001] "
+        "Response tool type - web_search_call, id - ws_a",
+        "action type - search, query - acme scam, queries - acme scam",
+    ] * 6
+    stats, rec = run(conn, lines)
+    assert stats["timestamped"] == 0
+    assert rec.counts["FILE_UNRECOGNIZED"] == 1
+    detail = conn.execute("SELECT detail FROM anomalies WHERE code='FILE_UNRECOGNIZED'").fetchone()[
+        0
+    ]
+    assert "TIMESTAMPED_RE" in detail
+
+
+def test_short_fragment_is_not_flagged_as_unrecognized(conn: sqlite3.Connection) -> None:
+    """Below the line floor, "no timestamped lines" is not evidence of anything."""
+    _, rec = run(conn, ["action type - search, query - a, queries - a"])
+    assert "FILE_UNRECOGNIZED" not in rec.counts
+
+
+def test_anomaly_payload_is_capped_but_counts_stay_exact(conn: sqlite3.Connection) -> None:
+    """A wrong assumption can fire once per line; the DB must not blow up."""
+    rec = AnomalyRecorder(conn, "logs", max_payload_rows=3)
+    for i in range(50):
+        rec.record("ORPHAN_ACTION", src_file="a.log", src_line=i, context=["x" * 500])
+    rec.flush()
+    assert rec.counts["ORPHAN_ACTION"] == 50
+    total, with_payload = conn.execute(
+        "SELECT COUNT(*), COUNT(context) FROM anomalies WHERE code='ORPHAN_ACTION'"
+    ).fetchone()
+    assert total == 50, "every occurrence must still be counted"
+    assert with_payload == 3, "only the first N keep the bulky context"
+
+
+def test_capped_samples_still_return_payload_bearing_rows(conn: sqlite3.Connection) -> None:
+    """`coa anomalies show` stays useful after capping kicks in."""
+    from coa.anomalies import samples
+
+    rec = AnomalyRecorder(conn, "logs", max_payload_rows=2)
+    for i in range(30):
+        rec.record("ORPHAN_ACTION", src_file="a.log", src_line=i, context=["ctx"])
+    rec.flush()
+    got = samples(conn, "ORPHAN_ACTION", 2)
+    assert all(r["context"] for r in got)
