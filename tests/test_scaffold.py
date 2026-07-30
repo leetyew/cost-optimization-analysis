@@ -189,6 +189,35 @@ def test_forget_file_cascades_to_children(conn: sqlite3.Connection) -> None:
         assert n == 0, f"{table} left {n} orphaned row(s) after forget_file"
 
 
+def test_forget_file_unmarks_files_whose_rows_it_cascades_away(
+    conn: sqlite3.Connection,
+) -> None:
+    """A duplicate run makes one file's calls hang off another file's run row, so
+    forgetting the owner cascades them away. Leaving the other file marked
+    ingested would be permanent silent loss — no re-run would restore it."""
+    conn.execute(
+        "INSERT INTO runs (id, se10, run_id, run_key, src_file, src_line) "
+        "VALUES (1, 'A', 0, 'run_0', 'f1.jsonl', 1)"
+    )
+    for src in ("f1.jsonl", "f2.jsonl"):
+        conn.execute(
+            "INSERT INTO search_calls (se10, run_pk, call_index, action_type, raw_json, "
+            "parse_conf, src_file, src_line) VALUES ('A', 1, 0, 'search', '{}', 'clean', ?, 1)",
+            (src,),
+        )
+        mark_ingested(conn, src, "weblog", 1)
+    conn.commit()
+
+    forget_file(conn, "f1.jsonl")
+    conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM search_calls").fetchone()["n"] == 0
+    assert not already_ingested(conn, "f1.jsonl")
+    assert not already_ingested(conn, "f2.jsonl"), (
+        "f2's rows were cascaded away, so it must be re-ingestable"
+    )
+
+
 def test_archetype_view_rolls_up_billed_calls(conn: sqlite3.Connection) -> None:
     """Cost share must come from the billed (singular `query`) rows only."""
     conn.execute(

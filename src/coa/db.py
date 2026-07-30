@@ -275,7 +275,23 @@ def forget_file(conn: sqlite3.Connection, src_file: str) -> None:
     Children (query_instances, answers, citations, votes) have no src_file of their
     own and go via ON DELETE CASCADE from search_calls / output_records — which is
     why `PRAGMA foreign_keys=ON` in connect() is load-bearing, not decoration.
+
+    One case needs care. When the same (se10, run_key) appears in two files, the
+    second file's calls attach to the first file's `runs` row (see DUP_RUN), so
+    deleting this file's runs cascades those calls away too. Leaving the other
+    file marked ingested would then be silent, permanent data loss: its rows are
+    gone and no re-run restores them. Un-marking it keeps the contract that rows
+    deleted implies file not ingested, so the next `coa ingest` rebuilds it.
     """
+    orphaned_files = [
+        r["src_file"]
+        for r in conn.execute(
+            "SELECT DISTINCT c.src_file FROM search_calls c JOIN runs r ON r.id = c.run_pk "
+            "WHERE r.src_file = ? AND c.src_file != ?",
+            (src_file, src_file),
+        )
+    ]
     for table in ("search_calls", "runs", "output_records", "merchants", "anomalies"):
         conn.execute(f"DELETE FROM {table} WHERE src_file = ?", (src_file,))
-    conn.execute("DELETE FROM ingested_files WHERE src_file = ?", (src_file,))
+    for other in [src_file, *orphaned_files]:
+        conn.execute("DELETE FROM ingested_files WHERE src_file = ?", (other,))
