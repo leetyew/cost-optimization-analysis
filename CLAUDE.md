@@ -67,10 +67,34 @@ Adding `reasoning` or `cache_read` as separate terms double-counts and inflates 
 baseline — the worst possible error in a document arguing another team should spend less.
 `TOKEN_SUM_MISMATCH` fires if the arithmetic ever stops holding.
 
-**One call is one billed search.** 592,710 calls / 19,269 merchants / ~2 runs ≈ 14 per run,
-matching the operator's independently-stated figure. If each `queries` entry billed
-separately the rate would be ~59. Only `action_type: search` carries the per-call fee;
-`open_page` and `find_in_page` consume tokens but no call fee.
+**The billing unit is UNRESOLVED, and it is a ~4x swing.** Treat every absolute cost figure
+as provisional until the dashboard reconciliation below is done.
+
+- *Structurally*, one `web_search_call` is one item with one id, one status, and one
+  `queries` array. `queries` sits inside a single call.
+- *For billing*, OpenAI support (developer forum, not official docs) states the tool "can
+  sometimes run multiple internal sub-searches for a single prompt… each one is counted as
+  a separate, billable call", with a reported case billing ~2.5x the visible invocations.
+  A constant `len(queries) == 4` is consistent with those sub-searches being visible here.
+
+| If billing is | Billed searches | At $10/1K |
+|---|---|---|
+| per visible call | 592,710 | ~$5.9k |
+| per `queries` entry | ~2.37M | ~$23.7k |
+
+An earlier note here claimed this was settled because 592,710 / 19,269 / ~2 runs ≈ 14 per
+run matches the operator's "~14 searches per run". **That reasoning is circular** if the ~14
+figure was itself derived from these logs — it confirms 14 *visible calls*, not 14 *billed
+searches*.
+
+**RESOLVE THIS FIRST:** take one day's call count and reconcile against the billing
+dashboard. The dashboard reports invocations, not billed sub-searches, so compare against
+the *charge*, not the displayed call count. Until then `is_billed_query` remains on the
+singular `query` — one row per call, shares summing to 100% — because that is the only
+attribution that is internally consistent; it is a stated convention, not a verified fact.
+
+Only `action_type: search` is believed to carry the per-call fee; `open_page` and
+`find_in_page` consume tokens but no call fee. Also unverified.
 
 **`service_tier` is part of the pricing key**, not a detail: flex bills near batch rates and
 priority roughly 2x standard — a ~4x spread. `config.yaml` holds rates per tier, all null
@@ -157,6 +181,8 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 | The answer-format instruction is part of the **user prompt**, attached to the questions | confirmed |
 | `logs/jsonl/*.jsonl` is the authoritative call source; `logs/*.log` is redundant except for timestamps | confirmed — action counts matched exactly |
 | A call's `queries` is a **fixed-length set of sub-queries within one call**, NOT cumulative session history | confirmed — length constant, members differ between consecutive calls |
+| Whether each `queries` entry bills as its own search | **UNRESOLVED, ~4x cost swing** — see "Cost model"; settle on the billing dashboard before publishing any figure |
+| `web_search_call.action.sources` would link citations to calls, but is opt-in (`include=[...]`) and absent here | confirmed from API docs — and it is per *call*, so it cannot attribute to an individual `queries` entry |
 | `input_tokens + output_tokens == total_tokens`, so `cache_read` and `reasoning` are **subsets** | confirmed — holds across the corpus |
 | `response_reasoning` has keys `id`/`type`/`summary`/`content`, but reasoning summaries were **not opted into**, so content is empty | confirmed — field not stored, only its token count |
 | `service_tier` appears per run and varies | confirmed — pricing is keyed by tier |
