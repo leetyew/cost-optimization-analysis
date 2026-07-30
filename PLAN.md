@@ -1,5 +1,27 @@
 # Web-Search Cost Optimization — Analysis Pipeline Implementation Plan
 
+> **SUPERSEDED IN PART — read this first.**
+>
+> This plan was written before anyone had seen the real data. Two of its assumptions
+> turned out to be wrong, and the affected sections are obsolete rather than merely
+> inaccurate. `CLAUDE.md` is authoritative where the two disagree.
+>
+> 1. **§3 (log parser) is void.** It specifies parsing `logs/*.log` — timestamped lines,
+>    adjacency pairing, orphan tracking, comma-split repair of `queries`. The real
+>    authoritative source is `logs/jsonl/*.jsonl`, structured JSON keyed by se10 and run,
+>    where all of that is given directly. The text logs were reconciled against it and the
+>    action counts matched exactly, so the text-log parser was deleted. `src/coa/weblogs.py`
+>    replaces it.
+> 2. **§6.3 (burst-based run attribution) is unnecessary.** Run identity is a structural
+>    key (`run_0`, `run_1`), so it is an exact join, not a heuristic. The match-rate caveat
+>    this section required on every per-run number no longer applies.
+> 3. **§6.6 (cost model) is incomplete.** The JSON carries `usage_metadata` with real token
+>    counts, `service_tier`, and `cache_read`, so cost is metered rather than inferred from
+>    call counts. See "Cost model" in `CLAUDE.md` for the formula and the subset rules.
+>
+> Everything else — §4, §5, §6.1, §6.2, §6.4, §6.5, §8, §9, §10 — still stands as written.
+
+
 Target executor: Claude Code, building in a connected environment against **synthetic fixtures**.
 Real data lives in an air-gapped environment (which itself has internet access, but Claude Code
 never sees the real logs). The repo must therefore be: (a) fully testable on fixtures,

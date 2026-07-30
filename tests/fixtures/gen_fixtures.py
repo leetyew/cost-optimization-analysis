@@ -7,7 +7,7 @@ to cost about three lines: append to a CASES list, bump a golden count.
 
 Produces a miniature `data/cost_optimization/` tree:
 
-    logs.zip           2 x .log   (clean pairs, orphans, wraps, junk, bad bytes)
+    logs/jsonl/*.jsonl 2 files    (runs, token usage, web_search_calls, bad bytes)
     input/*.jsonl      2 files    (merchant details, one duplicate se10)
     output/*.jsonl     2 files    (answers, citations, votes, drift, bad JSON)
 
@@ -23,7 +23,6 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -192,200 +191,161 @@ def queries_for(m: dict, rng: random.Random) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Log generation
+# Web-search logs (logs/jsonl/*.jsonl)
 # ---------------------------------------------------------------------------
 
-NOISE_LINES = [
-    "loading configuration from /etc/app/config.yaml",
-    "  ",
-    "=====",
-    "cache warm complete",
-]
+SERVICE_TIERS = ["standard", "flex", "priority"]
 
 
-class LogBuilder:
-    """Accumulates log lines and tallies what was planted, for the golden file."""
+def build_web_search_calls(m: dict, rng: random.Random, n_searches: int) -> list[dict]:
+    """One run's `web_search_calls` array.
 
-    def __init__(self, rng: random.Random) -> None:
-        self.rng = rng
-        self.lines: list[str] = []
-        self.tally: Counter[str] = Counter()
-        self._clock = 0
-
-    def _ts(self) -> str:
-        """Monotonic fake clock. Minute-scale steps keep run bursts separable."""
-        self._clock += self.rng.randint(1, 20)
-        h, rem = divmod(self._clock, 3600)
-        mnt, sec = divmod(rem, 60)
-        return f"2026-07-30 {10 + h % 12:02d}:{mnt:02d}:{sec:02d},{self.rng.randint(0, 999):03d}"
-
-    def ws_line(self, se10: str, ws_id: str) -> None:
-        """The `Response tool type - web_search_call` line that enables strict pairing."""
-        self.lines.append(
-            f"{self._ts()} | INFO | app.search | [{se10}] "
-            f"Response tool type - web_search_call, id - {ws_id}"
-        )
-        self.tally["web_search_call"] += 1
-
-    def action_search(self, query: str, queries: list[str], *, strict: bool) -> None:
-        qs = " , ".join(queries)
-        self.lines.append(f"action type - search, query - {query}, queries - {qs}")
-        self.tally["action_search"] += 1
-        self.tally["strict" if strict else "orphan"] += 1
-
-    def action_open_page(self, url: str, *, strict: bool) -> None:
-        self.lines.append(f"action type - open_page, url - {url}")
-        self.tally["action_open_page"] += 1
-        self.tally["strict" if strict else "orphan"] += 1
-
-    def action_find_in_page(self, url: str, pattern: str, *, spelling: str, strict: bool) -> None:
-        self.lines.append(f"action type - {spelling}, url - {url}, pattern - {pattern}")
-        self.tally["action_find_in_page"] += 1
-        self.tally["strict" if strict else "orphan"] += 1
-
-    def noise(self, n: int = 1) -> None:
-        for _ in range(n):
-            self.lines.append(self.rng.choice(NOISE_LINES))
-            self.tally["noise"] += 1
-
-    def other_timestamped(self, se10: str, msg: str) -> None:
-        """A timestamped line that is NOT a web_search_call — breaks strict pairing."""
-        self.lines.append(f"{self._ts()} | DEBUG | app.core | [{se10}] {msg}")
-        self.tally["other_timestamped"] += 1
-
-
-def build_clean_log(merchants: list[dict], rng: random.Random) -> LogBuilder:
-    """Log file 1: the happy path, plus benign noise between call groups.
-
-    Every action line here is immediately preceded by its web_search_call line, so
-    all of it must come out strict-paired. This file establishes the baseline the
-    pairing-loss KPI is measured against.
+    Mirrors the real shape per action type: `search` carries `query` + `queries`,
+    `open_page` carries `url`, `find_in_page` carries `details`. The corpus-wide
+    ratio is roughly 85/13/2, so the counts here follow that rather than being
+    uniform — position-in-run analysis depends on the mix being realistic.
     """
-    lb = LogBuilder(rng)
-    for m in merchants:
-        n_runs = 1 + (int(m["se10"]) % 4)  # run counts 1..4
-        for run in range(n_runs):
-            for q in queries_for(m, rng):
-                ws = f"ws_{m['se10'][-4:]}{run}{rng.randint(100, 999)}"
-                lb.ws_line(m["se10"], ws)
-                lb.action_search(q, [q], strict=True)
-            # open_page / find in page: token cost but (believed) no per-call fee
-            ws = f"ws_{m['se10'][-4:]}{run}op"
-            lb.ws_line(m["se10"], ws)
-            lb.action_open_page(f"https://example.test/{m['se10']}", strict=True)
-        lb.noise(rng.randint(0, 2))
-    return lb
-
-
-def build_messy_log(merchants: list[dict], rng: random.Random) -> LogBuilder:
-    """Log file 2: one planted instance of every parsing hazard in PLAN.md §10.
-
-    Each block below is a named hazard. Keeping them explicit (rather than
-    randomly sprinkled) is what makes a golden count meaningful — a test can
-    assert "exactly one COMMA_IN_QUERY" and mean it.
-    """
-    lb = LogBuilder(rng)
-    m = merchants[0]
-    se10 = m["se10"]
-    name = m["se_toc_name"]
-
-    # 1. Baseline strict pair, so this file is not pathological end to end.
-    lb.ws_line(se10, "ws_base001")
-    lb.action_search(f"{name} scam", [f"{name} scam"], strict=True)
-
-    # 2. ORPHAN_ACTION: action at file position with no preceding web_search_call.
-    lb.noise(1)
-    lb.action_search(f"{name} orphaned", [f"{name} orphaned"], strict=False)
-
-    # 3. ORPHAN via async interleaving: another merchant's timestamped line cuts in
-    #    between the web_search_call and its action. This is the race the operator
-    #    described, and the reason pairing loss is a reported KPI.
-    lb.ws_line(se10, "ws_race001")
-    lb.other_timestamped(merchants[1]["se10"], "heartbeat from concurrent worker")
-    lb.action_search(f"{name} raced", [f"{name} raced"], strict=False)
-
-    # 4. COMMA_IN_QUERY: the query itself contains a comma, so naive comma-splitting
-    #    of `queries` breaks it. The singular `query` is the ground truth used to
-    #    repair the split — the one honest signal available.
-    comma_q = f"{name}, {m['city']} reviews"
-    lb.ws_line(se10, "ws_comma01")
-    lb.lines.append(f"action type - search, query - {comma_q}, queries - {comma_q} , {name} scam")
-    lb.tally["action_search"] += 1
-    lb.tally["strict"] += 1
-    lb.tally["comma_in_query"] += 1
-
-    # 5. Embedded double quotes: quotes are CONTENT here, not delimiters. A
-    #    quote-aware CSV parse would mangle this, which is why §3 forbids one.
-    quoted = f'"{name}" complaints'
-    lb.ws_line(se10, "ws_quote01")
-    lb.action_search(quoted, [quoted, f"{name} scam"], strict=True)
-    lb.tally["embedded_quotes"] += 1
-
-    # 6. Unquoted junk item in `queries` alongside a sane one.
-    lb.ws_line(se10, "ws_junk001")
-    lb.lines.append(
-        f"action type - search, query - {name} lawsuit, "
-        f'queries - {name} lawsuit , "asdasd" asdasd , '
-    )
-    lb.tally["action_search"] += 1
-    lb.tally["strict"] += 1
-    lb.tally["junk_query_item"] += 1
-
-    # 7. UNKNOWN_ACTION_TYPE: stored verbatim, never dropped.
-    lb.ws_line(se10, "ws_unk0001")
-    lb.lines.append("action type - summarize_page, url - https://example.test/x")
-    lb.tally["action_unknown"] += 1
-    lb.tally["strict"] += 1
-
-    # 8. POSSIBLE_WRAPPED_ACTION: a non-noise line directly after an action line,
-    #    which may be a wrapped continuation. Both raw forms are kept; field
-    #    extraction is NOT silently re-run on the merged line.
-    lb.ws_line(se10, "ws_wrap001")
-    lb.action_search(f"{name} bankruptcy", [f"{name} bankruptcy"], strict=True)
-    lb.lines.append("filings public record search continued")
-    lb.tally["possible_wrap"] += 1
-
-    # 9. ACTION_FIELD_MISSING: open_page with no url field.
-    lb.ws_line(se10, "ws_miss001")
-    lb.lines.append("action type - open_page")
-    lb.tally["action_open_page"] += 1
-    lb.tally["strict"] += 1
-    lb.tally["field_missing"] += 1
-
-    # 10. Both find-in-page spellings, one strict each.
-    for spelling in ("find in page", "find_in_page"):
-        lb.ws_line(se10, f"ws_fip{len(spelling):03d}")
-        lb.action_find_in_page(
-            "https://example.test/report", "chargeback", spelling=spelling, strict=True
+    calls = []
+    pool = queries_for(m, rng)
+    for i in range(n_searches):
+        q = pool[i % len(pool)]
+        # `queries` is a set of sub-queries WITHIN one billed call, not a
+        # cumulative history: real runs show a constant length with differing
+        # members. The singular `query` is the billed unit and appears among them.
+        others = [x for x in pool if x != q]
+        rng.shuffle(others)
+        calls.append(
+            {
+                "id": f"ws_{m['se10'][-4:]}_{i:02d}",
+                "status": "completed",
+                "action_type": "search",
+                "query": q,
+                "queries": [q, *others[:3]],
+            }
         )
+    for i in range(max(1, n_searches // 7)):
+        calls.append(
+            {
+                "id": f"op_{m['se10'][-4:]}_{i:02d}",
+                "status": "completed",
+                "action_type": "open_page",
+                "url": f"https://{m['se_toc_name'].split()[0].lower()}-source{i}.example/page",
+            }
+        )
+    if rng.random() < 0.3:
+        calls.append(
+            {
+                "id": f"fp_{m['se10'][-4:]}",
+                "status": "completed",
+                "action_type": "find_in_page",
+                "details": f"pattern: chargeback | url: https://example.test/{m['se10']}",
+            }
+        )
+    return calls
 
-    # 11. MULTI_QUERIES_MARKER: `, queries - ` appears twice; the LAST one wins.
-    lb.ws_line(se10, "ws_multi01")
-    lb.lines.append(
-        f"action type - search, query - {name} , queries - refund policy, "
-        f"queries - {name} , queries - refund policy"
+
+def build_weblog_record(m: dict, rng: random.Random, *, n_runs: int) -> tuple[dict, Counter]:
+    """One `logs/jsonl` line: {se10: {run_k: {usage_metadata, ..., calls}}}."""
+    tally: Counter[str] = Counter()
+    runs = {}
+    for run in range(n_runs):
+        calls = build_web_search_calls(m, rng, rng.randint(3, 6))
+        # cache_read is a SUBSET of input_tokens and reasoning a SUBSET of
+        # output_tokens, so input + output == total holds exactly. A generator
+        # that got this wrong would hide the double-counting bug it exists to catch.
+        cache_read = rng.randint(0, 4000)
+        input_tokens = cache_read + rng.randint(1000, 6000)
+        reasoning = rng.randint(0, 500)
+        output_tokens = reasoning + rng.randint(200, 1500)
+        runs[f"run_{run}"] = {
+            "usage_metadata": {
+                "service_tier": SERVICE_TIERS[int(m["se10"]) % len(SERVICE_TIERS)],
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "cache_read": cache_read,
+                "reasoning": reasoning,
+            },
+            # They did not opt into reasoning summaries, so content is empty. The
+            # keys are still present, which is what the parser must tolerate.
+            "response_reasoning": {
+                "id": f"rs_{m['se10']}",
+                "type": "reasoning",
+                "summary": [],
+                "content": [],
+            },
+            "web_search_calls": calls,
+        }
+        tally["runs"] += 1
+        tally["calls"] += len(calls)
+        for c in calls:
+            tally[f"action_{c['action_type']}"] += 1
+        tally["input_tokens"] += input_tokens
+        tally["output_tokens"] += output_tokens
+        tally["cache_read"] += cache_read
+        tally["reasoning"] += reasoning
+    tally["merchants"] += 1
+    return {m["se10"]: runs}, tally
+
+
+def build_weblogs(merchants: list[dict], rng: random.Random) -> tuple[list[dict], Counter]:
+    """Records for every merchant, plus the planted hazards.
+
+    Hazards are applied to existing records rather than appended, so merchant
+    counts stay assertable — the same discipline the output fixtures use.
+    """
+    records, tally = [], Counter()
+    for i, m in enumerate(merchants):
+        rec, t = build_weblog_record(m, rng, n_runs=1 + (i % 3))
+        records.append(rec)
+        tally.update(t)
+
+    # UNKNOWN_ACTION_TYPE: stored verbatim, never dropped.
+    first_run = next(iter(records[1].values()))["run_0"]
+    first_run["web_search_calls"].append(
+        {
+            "id": "unk_0001",
+            "status": "completed",
+            "action_type": "summarize_page",
+            "url": "https://example.test/x",
+        }
     )
-    lb.tally["action_search"] += 1
-    lb.tally["strict"] += 1
-    lb.tally["multi_queries_marker"] += 1
+    tally["calls"] += 1
+    tally["action_summarize_page"] += 1
+    tally["planted_unknown_action"] += 1
 
-    # 12. QUERY_NOT_IN_QUERIES: the operator believes this never happens. Plant one
-    #     so the detector itself is proven to fire.
-    lb.ws_line(se10, "ws_notin01")
-    lb.lines.append(
-        f"action type - search, query - {name} tax liens, queries - unrelated other query"
-    )
-    lb.tally["action_search"] += 1
-    lb.tally["strict"] += 1
-    lb.tally["query_not_in_queries"] += 1
+    # QUERY_NOT_IN_QUERIES: the operator believes this never happens.
+    call = next(iter(records[2].values()))["run_0"]["web_search_calls"][0]
+    call["queries"] = ["an unrelated query", "another one"]
+    tally["planted_query_not_in_queries"] += 1
 
-    # A few more clean merchants so this file has usable bulk too.
-    for other in merchants[16:22]:
-        for q in queries_for(other, rng)[:2]:
-            lb.ws_line(other["se10"], f"ws_{other['se10'][-4:]}xx")
-            lb.action_search(q, [q], strict=True)
+    # CALL_STATUS_NOT_COMPLETED: does an incomplete call still bill?
+    next(iter(records[3].values()))["run_0"]["web_search_calls"][0]["status"] = "failed"
+    tally["planted_status_not_completed"] += 1
 
-    return lb
+    # CALL_FIELD_MISSING: a search with no query cannot be attributed.
+    del next(iter(records[4].values()))["run_0"]["web_search_calls"][0]["query"]
+    tally["planted_field_missing"] += 1
+
+    # TOKEN_SUM_MISMATCH: the subset assumption the whole cost model rests on.
+    usage = next(iter(records[5].values()))["run_0"]["usage_metadata"]
+    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"] + usage["reasoning"]
+    tally["planted_token_sum_mismatch"] += 1
+
+    # MISSING_USAGE_METADATA: a run whose tokens cannot be costed at all. Its
+    # tokens leave the golden totals with it, or the goldens would assert a sum
+    # the corpus no longer contains.
+    orphaned = next(iter(records[6].values()))["run_0"].pop("usage_metadata")
+    for key in ("input_tokens", "output_tokens", "cache_read", "reasoning"):
+        tally[key] -= orphaned[key]
+    tally["planted_no_usage_metadata"] += 1
+
+    # RUN_KEY_UNPARSED: a run key that is not run_<n>.
+    runs = next(iter(records[7].values()))
+    runs["retry_final"] = runs.pop("run_0")
+    tally["planted_run_key_unparsed"] += 1
+
+    return records, tally
 
 
 # ---------------------------------------------------------------------------
@@ -602,57 +562,43 @@ def write_fixtures() -> dict:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     (DATA_ROOT / "input").mkdir(exist_ok=True)
     (DATA_ROOT / "output").mkdir(exist_ok=True)
+    (DATA_ROOT / "logs" / "jsonl").mkdir(parents=True, exist_ok=True)
 
     golden: dict = {"n_merchants": len(merchants), "n_questions": N_QUESTIONS}
 
-    # --- logs.zip -----------------------------------------------------------
-    clean = build_clean_log(merchants[:15], random.Random(SEED + 1))
-    messy = build_messy_log(merchants, random.Random(SEED + 2))
-
-    clean_bytes = ("\n".join(clean.lines) + "\n").encode("utf-8")
-    # A stray non-UTF8 byte: ingest must read with errors="replace" and record
+    # --- logs/jsonl/*.jsonl --------------------------------------------------
+    weblogs, wl_tally = build_weblogs(merchants, random.Random(SEED + 1))
+    # Split across two files so per-file resumability is exercised, and inject a
+    # bad JSON line plus a non-UTF8 byte: ingest must record BAD_JSON_LINE and
     # ENCODING rather than crash or skip the file.
-    messy_bytes = ("\n".join(messy.lines) + "\n").encode("utf-8")
-    # Damage the heartbeat message body, not a noise line. Corrupting a noise line
-    # would stop it matching config.noise_patterns, so it would also trip the
-    # wrapped-action heuristic and two hazards would share one line — correct
-    # behaviour, but it makes both counts untestable in isolation.
-    assert b"heartbeat from" in messy_bytes, "ENCODING hazard lost its injection target"
-    messy_bytes = messy_bytes.replace(b"heartbeat from", b"heart\xffbeat from", 1)
+    half = len(weblogs) // 2
+    _write_jsonl(DATA_ROOT / "logs" / "jsonl" / "calls_001.jsonl", weblogs[:half])
+    _write_jsonl(DATA_ROOT / "logs" / "jsonl" / "calls_002.jsonl", weblogs[half:], bad_json_after=2)
+    damaged = DATA_ROOT / "logs" / "jsonl" / "calls_001.jsonl"
+    payload = damaged.read_bytes()
+    assert b"chargeback" in payload, "ENCODING hazard lost its injection target"
+    damaged.write_bytes(payload.replace(b"chargeback", b"charge\xffback", 1))
 
-    # Pin the member timestamps. writestr() otherwise stamps time.localtime(), so
-    # the archive bytes would differ on every run — which both breaks the
-    # determinism guarantee the golden counts rest on and produces a spurious git
-    # diff every time anyone regenerates the fixtures.
-    with zipfile.ZipFile(DATA_ROOT / "logs.zip", "w", zipfile.ZIP_DEFLATED) as z:
-        for member, payload in (
-            ("logs/clean_001.log", clean_bytes),
-            ("logs/messy_002.log", messy_bytes),
-        ):
-            info = zipfile.ZipInfo(member, date_time=(2026, 7, 30, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            z.writestr(info, payload)
-
-    golden["logs"] = {
-        "clean": dict(clean.tally),
-        "messy": dict(messy.tally),
-        "total_action_lines": (
-            sum(
-                clean.tally[k] for k in ("action_search", "action_open_page", "action_find_in_page")
-            )
-            + sum(
-                messy.tally[k]
-                for k in (
-                    "action_search",
-                    "action_open_page",
-                    "action_find_in_page",
-                    "action_unknown",
-                )
-            )
-        ),
-        "total_strict": clean.tally["strict"] + messy.tally["strict"],
-        "total_orphan": clean.tally["orphan"] + messy.tally["orphan"],
+    golden["weblogs"] = {
+        "merchants": wl_tally["merchants"],
+        "runs": wl_tally["runs"],
+        "calls": wl_tally["calls"],
+        "action_search": wl_tally["action_search"],
+        "action_open_page": wl_tally["action_open_page"],
+        "action_find_in_page": wl_tally["action_find_in_page"],
+        "action_summarize_page": wl_tally["action_summarize_page"],
+        "bad_json_lines": 1,
+        "input_tokens": wl_tally["input_tokens"],
+        "output_tokens": wl_tally["output_tokens"],
+        "cache_read": wl_tally["cache_read"],
+        "reasoning": wl_tally["reasoning"],
+        "planted_unknown_action": wl_tally["planted_unknown_action"],
+        "planted_query_not_in_queries": wl_tally["planted_query_not_in_queries"],
+        "planted_status_not_completed": wl_tally["planted_status_not_completed"],
+        "planted_field_missing": wl_tally["planted_field_missing"],
+        "planted_token_sum_mismatch": wl_tally["planted_token_sum_mismatch"],
+        "planted_no_usage_metadata": wl_tally["planted_no_usage_metadata"],
+        "planted_run_key_unparsed": wl_tally["planted_run_key_unparsed"],
     }
 
     # --- input/*.jsonl ------------------------------------------------------
@@ -743,13 +689,13 @@ def write_fixtures() -> dict:
     golden["expected_anomaly_codes"] = sorted(
         [
             "ENCODING",
-            "ORPHAN_ACTION",
             "UNKNOWN_ACTION_TYPE",
-            "POSSIBLE_WRAPPED_ACTION",
-            "ACTION_FIELD_MISSING",
-            "COMMA_IN_QUERY",
-            "MULTI_QUERIES_MARKER",
             "QUERY_NOT_IN_QUERIES",
+            "CALL_STATUS_NOT_COMPLETED",
+            "CALL_FIELD_MISSING",
+            "TOKEN_SUM_MISMATCH",
+            "MISSING_USAGE_METADATA",
+            "RUN_KEY_UNPARSED",
             "BAD_JSON_LINE",
             "DUP_INPUT_SE10",
             "DUP_OUTPUT_SE10",
@@ -796,8 +742,10 @@ if __name__ == "__main__":
     g = write_fixtures()
     print(f"fixtures written to {DATA_ROOT}")
     print(f"  merchants        {g['n_merchants']}")
-    print(f"  action lines     {g['logs']['total_action_lines']}")
-    print(f"  strict / orphan  {g['logs']['total_strict']} / {g['logs']['total_orphan']}")
+    w = g["weblogs"]
+    print(f"  weblog runs      {w['runs']} ({w['calls']} calls)")
+    print(f"    search         {w['action_search']}  <- the only billed action")
+    print(f"    open_page      {w['action_open_page']}, find_in_page {w['action_find_in_page']}")
     print(f"  output records   {g['outputs']['n_records']}")
     o = g["outputs"]
     print(f"  runs / blocks    {o['n_runs']} / {o['answer_blocks']}")

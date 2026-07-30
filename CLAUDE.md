@@ -9,16 +9,34 @@ then majority-votes the answers. Average ~14 web searches per merchant per run.
 **This repo does not run that pipeline.** It parses that team's logs and outputs to answer
 one question: *which of those searches can be cut, and what does that save?*
 
-Scale: ~20k merchants, ~2 GB zipped logs. Stream everything; never assume a file fits in
-memory. 2 GB is small enough that stdlib `sqlite3` handles all storage and analysis.
+Scale, measured on the real corpus: **19,269 merchants, ~2 runs each, 694,695 web-search
+calls** — 592,710 `search` (85.3%), 87,854 `open_page` (12.6%), 14,131 `find_in_page` (2.0%).
+Stream everything; never assume a file fits in memory. Stdlib `sqlite3` handles all storage
+and analysis at this scale.
+
+## Source layout (`data/cost_optimization/`)
+
+| Tree | Content |
+|---|---|
+| `logs/jsonl/*.jsonl` | **The authoritative source.** One merchant per line: `{se10: {run_k: {usage_metadata, response_reasoning, web_search_calls[]}}}` |
+| `input/*.jsonl` | Merchant detail records -> `merchants` + `pii_terms` |
+| `output/*.jsonl` | Answers, citations, votes for the 48-question prompt |
+
+`logs/*.log` also exists — a text log of the same events. **It is deliberately not parsed.**
+Its action-type tallies matched `logs/jsonl` *exactly* (592,710 / 87,854 / 14,131), so it is
+pure redundancy except for timestamps, and nothing in the deliverables needs a clock:
+position within a run comes from array order in `web_search_calls`. Parsing it cost ~1,100
+lines of pairing state machine, comma-split repair, and burst-based run attribution, all to
+reconstruct what the JSON states outright. If time-of-day or latency analysis is ever wanted,
+the files are still on disk.
 
 ## Core invariants (never violate)
 
 1. **Never crash on malformed input. Never silently drop it either.** Every unparseable
    thing gets an `anomalies` row with full raw context, and the record is still stored with
    a confidence marker. Non-zero anomaly counts are the expected steady state, not a bug.
-2. **Retain raw text always** — `raw_action_line`, `queries_raw`, `raw_json`. This is what
-   makes `coa reparse` possible (re-extract fields from SQLite without re-reading 2 GB).
+2. **Retain raw text always** — `search_calls.raw_json`, `merchants.raw_json`. This is what
+   makes `coa reparse` possible (re-extract fields from SQLite without re-reading the corpus).
 3. **Never commit merchant PII.** `coa.sqlite`, `reports/`, `data/` are gitignored at the
    repo root. Check before every commit.
 4. **Pricing constants stay `null`** until an operator fills them from the billing
@@ -27,6 +45,43 @@ memory. 2 GB is small enough that stdlib `sqlite3` handles all storage and analy
 5. **Nothing unverifiable goes in a report.** The output is an argument aimed at another
    team's budget; an unmeasurable heuristic is the weakest link. Prefer an exact, narrower
    claim over an inferred, broader one — and label every heuristic that does survive.
+
+## Cost model
+
+`usage_metadata` gives measured token volume per run, so cost is metered rather than
+inferred from call counts. Two subset relationships are load-bearing and easy to get
+backwards — **verified on the corpus (`input + output == total` holds exactly) and in
+OpenAI's docs**:
+
+- `cache_read` is **inside** `input_tokens`, billed at the discounted cached-input rate.
+- `reasoning` is **inside** `output_tokens`, billed at the output rate.
+
+```
+cost = (input_tokens - cache_read) * input_rate
+     +  cache_read                * cached_input_rate
+     +  output_tokens             * output_rate        # reasoning already inside
+     +  n_search_calls            * fee_per_1k / 1000
+```
+
+Adding `reasoning` or `cache_read` as separate terms double-counts and inflates the
+baseline — the worst possible error in a document arguing another team should spend less.
+`TOKEN_SUM_MISMATCH` fires if the arithmetic ever stops holding.
+
+**One call is one billed search.** 592,710 calls / 19,269 merchants / ~2 runs ≈ 14 per run,
+matching the operator's independently-stated figure. If each `queries` entry billed
+separately the rate would be ~59. Only `action_type: search` carries the per-call fee;
+`open_page` and `find_in_page` consume tokens but no call fee.
+
+**`service_tier` is part of the pricing key**, not a detail: flex bills near batch rates and
+priority roughly 2x standard — a ~4x spread. `config.yaml` holds rates per tier, all null
+until an operator fills them from the billing dashboard.
+
+Two cost levers that need **no change to search behaviour at all**, both visible in the
+ingest summary from the first run:
+
+- **Service tier.** Batch fraud screening is exactly what flex exists for.
+- **Cache hit rate.** The 48-question prompt is a fixed prefix — an ideal caching profile.
+  A low hit rate means paying full rate for something that should be nearly free.
 
 ## The air-gap (shapes everything)
 
@@ -78,6 +133,12 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 | Evidence is returned **only when the answer is ≤ 3**; otherwise NULL | confirmed |
 | Free-text questions (registered address, building type) return **`value \| NULL`** — a literal `NULL` is a first-class *answer*, not only an evidence state | confirmed |
 | The answer-format instruction is part of the **user prompt**, attached to the questions | confirmed |
+| `logs/jsonl/*.jsonl` is the authoritative call source; `logs/*.log` is redundant except for timestamps | confirmed — action counts matched exactly |
+| A call's `queries` is a **fixed-length set of sub-queries within one call**, NOT cumulative session history | confirmed — length constant, members differ between consecutive calls |
+| `input_tokens + output_tokens == total_tokens`, so `cache_read` and `reasoning` are **subsets** | confirmed — holds across the corpus |
+| `response_reasoning` has keys `id`/`type`/`summary`/`content`, but reasoning summaries were **not opted into**, so content is empty | confirmed — field not stored, only its token count |
+| `service_tier` appears per run and varies | confirmed — pricing is keyed by tier |
+| Whether a non-`completed` call is still billed | **unconfirmed** — `CALL_STATUS_NOT_COMPLETED` counts them; settle on the billing dashboard |
 | When no evidence is required, whether the line reads `Evidence. NULL`, a bare `Evidence.`, or is **omitted entirely** | **unconfirmed** — all three parsed; see `evidence shapes` in the ingest summary |
 | Whether a scale answer is a bare digit or a digit followed by prose | **unconfirmed** — `answer_text` stored verbatim, scale value derived, never assumed |
 | Whether `answer_dict` holds their parse of the same prose or a normalized form | **unconfirmed** — `agree_with_dict` measures it; `ANSWER_PARSE_MISMATCH` is aggregated per (record, run) so a systematic difference cannot flood |
@@ -100,12 +161,12 @@ Two consequences that are easy to get backwards:
   a stated trigger — see the reversal triggers in the plan; heavier options
   (rapidfuzz/sklearn/sentence-transformers, dnspython/whois, pandas/duckdb) were all
   deliberately deferred behind measurements, not forgotten.
-- Layout: `src/coa/{config,anomalies,db,logs,outputs,inputs,normalize,metrics,report,cli}.py`
+- Layout: `src/coa/{config,anomalies,db,weblogs,outputs,inputs,normalize,metrics,report,cli}.py`
 
 ## Architectural rules
 
 - **Parsers take `(src_name, lines_iterable)` — never a path.** `cli.py` owns all path and
-  zip walking. This keeps `logs.py` / `outputs.py` / `inputs.py` pure over line iterators so
+  zip walking. This keeps `weblogs.py` / `outputs.py` / `inputs.py` pure over line iterators so
   they can be unit-tested against a 6-line in-memory string.
 - **Cost attribution:** a billed call's archetype comes from the singular `query` field.
   The plural `queries` list is for parse repair and redundancy analysis only, never cost.

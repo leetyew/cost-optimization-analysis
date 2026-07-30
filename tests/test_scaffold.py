@@ -41,28 +41,31 @@ def conn(tmp_path: Path) -> sqlite3.Connection:
 
 def test_config_loads_repo_yaml() -> None:
     cfg = Config.load(Path(__file__).parent.parent / "config.yaml")
-    assert cfg.thresholds.run_burst_gap_seconds == 120
-    assert cfg.anomalies.context_lines == 3
+    assert cfg.thresholds.head_templates_export == 200
+    assert cfg.anomalies.max_excerpt_chars == 2000
 
 
 def test_pricing_starts_unverified() -> None:
     """Every price is null until an operator fills it, and the code must know it."""
     cfg = Config.load(Path(__file__).parent.parent / "config.yaml")
     assert not cfg.pricing.is_verified
-    assert "fee_per_1k_search_calls" in cfg.pricing.missing()
+    assert "standard.fee_per_1k_search_calls" in cfg.pricing.missing()
+
+
+def test_pricing_is_per_service_tier() -> None:
+    """Flex bills near batch rates and priority ~2x standard — a single set of
+    constants could be wrong by ~4x, so the tier is part of the key."""
+    cfg = Config.load(Path(__file__).parent.parent / "config.yaml")
+    assert {"standard", "flex", "priority"} <= set(cfg.pricing.tiers)
+    assert cfg.pricing.for_tier("flex").output_per_mtok is None
+    # An unknown tier must not raise; it falls back to empty rates.
+    assert cfg.pricing.for_tier("nonesuch").missing()
 
 
 def test_config_defaults_without_file(tmp_path: Path) -> None:
     """A missing config file is usable, not fatal."""
     cfg = Config.load(tmp_path / "nope.yaml")
     assert cfg.db == Path("coa.sqlite")
-
-
-def test_noise_pattern_matching() -> None:
-    cfg = Config.load(Path(__file__).parent.parent / "config.yaml")
-    assert cfg.is_noise("   ")
-    assert cfg.is_noise("=====")
-    assert not cfg.is_noise("filings public record search continued")
 
 
 # --- schema ---------------------------------------------------------------
@@ -76,7 +79,7 @@ def test_schema_creates_all_tables(conn: sqlite3.Connection) -> None:
     for expected in (
         "merchants",
         "pii_terms",
-        "log_events",
+        "runs",
         "search_calls",
         "query_instances",
         "output_records",
@@ -163,9 +166,13 @@ def test_forget_file_cascades_to_children(conn: sqlite3.Connection) -> None:
         "VALUES ('1000000001', 1, 1, 'Yes')"
     )
     conn.execute(
-        "INSERT INTO search_calls (id, se10, action_type, raw_action_line, pairing, "
+        "INSERT INTO runs (id, se10, run_id, run_key, src_file, src_line) "
+        "VALUES (3, '1000000001', 0, 'run_0', 'logs/jsonl/a.jsonl', 1)"
+    )
+    conn.execute(
+        "INSERT INTO search_calls (id, se10, run_pk, call_index, action_type, raw_json, "
         "parse_conf, src_file, src_line) "
-        "VALUES (7, '1000000001', 'search', 'raw', 'strict', 'clean', 'logs.zip!a.log', 3)"
+        "VALUES (7, '1000000001', 3, 0, 'search', '{}', 'clean', 'logs/jsonl/a.jsonl', 1)"
     )
     conn.execute(
         "INSERT INTO query_instances (search_call_id, se10, query_text) "
@@ -174,7 +181,7 @@ def test_forget_file_cascades_to_children(conn: sqlite3.Connection) -> None:
     conn.commit()
 
     forget_file(conn, "output/a.jsonl")
-    forget_file(conn, "logs.zip!a.log")
+    forget_file(conn, "logs/jsonl/a.jsonl")
     conn.commit()
 
     for table in ("answers", "citations", "votes", "query_instances"):
@@ -185,9 +192,9 @@ def test_forget_file_cascades_to_children(conn: sqlite3.Connection) -> None:
 def test_archetype_view_rolls_up_billed_calls(conn: sqlite3.Connection) -> None:
     """Cost share must come from the billed (singular `query`) rows only."""
     conn.execute(
-        "INSERT INTO search_calls (id, se10, action_type, raw_action_line, pairing, "
+        "INSERT INTO search_calls (id, se10, call_index, action_type, raw_json, "
         "parse_conf, src_file, src_line) VALUES "
-        "(1, '1', 'search', 'r', 'strict', 'clean', 'f', 1)"
+        "(1, '1', 0, 'search', '{}', 'clean', 'f', 1)"
     )
     conn.executemany(
         "INSERT INTO query_instances (search_call_id, se10, query_text, template, "
@@ -208,11 +215,16 @@ def test_archetype_view_rolls_up_billed_calls(conn: sqlite3.Connection) -> None:
 
 def test_recorder_buffers_then_flushes(conn: sqlite3.Connection) -> None:
     rec = AnomalyRecorder(conn, "logs")
-    rec.record("ORPHAN_ACTION", src_file="a.log", src_line=5, raw_excerpt="action type - search")
+    rec.record(
+        "CALL_FIELD_MISSING",
+        src_file="logs/jsonl/a.jsonl",
+        src_line=5,
+        raw_excerpt='{"action_type": "search"}',
+    )
     assert conn.execute("SELECT COUNT(*) AS n FROM anomalies").fetchone()["n"] == 0
     rec.flush()
     assert conn.execute("SELECT COUNT(*) AS n FROM anomalies").fetchone()["n"] == 1
-    assert rec.counts["ORPHAN_ACTION"] == 1
+    assert rec.counts["CALL_FIELD_MISSING"] == 1
 
 
 def test_recorder_flush_is_repeatable(conn: sqlite3.Connection) -> None:
@@ -241,11 +253,11 @@ def test_render_samples_is_fenced_and_capped(conn: sqlite3.Connection) -> None:
     rec = AnomalyRecorder(conn, "logs")
     for i in range(20):
         rec.record(
-            "ORPHAN_ACTION", src_file=f"f{i % 3}.log", src_line=i, context=["a", ">> b", "c"]
+            "CALL_FIELD_MISSING", src_file=f"f{i % 3}.jsonl", src_line=i, context=["a", ">> b", "c"]
         )
     rec.flush()
-    rows = samples(conn, "ORPHAN_ACTION", 4)
-    out = render_samples("ORPHAN_ACTION", rows, 20)
+    rows = samples(conn, "CALL_FIELD_MISSING", 4)
+    out = render_samples("CALL_FIELD_MISSING", rows, 20)
     assert out.count("```") == 2, "output must be a single fenced block, ready to paste"
     assert "showing 4 of 20" in out
     assert len(rows) == 4
@@ -292,28 +304,29 @@ def test_golden_file_matches_generator(golden: dict) -> None:
 
 
 def test_fixtures_plant_every_hazard(golden: dict) -> None:
-    """Each PLAN.md §10 hazard is present and counted."""
-    messy = golden["logs"]["messy"]
+    """Every hazard the parsers defend against is present and counted."""
+    weblogs = golden["weblogs"]
     for hazard in (
-        "comma_in_query",
-        "embedded_quotes",
-        "junk_query_item",
-        "action_unknown",
-        "possible_wrap",
-        "field_missing",
-        "multi_queries_marker",
-        "query_not_in_queries",
-        "orphan",
+        "planted_unknown_action",
+        "planted_query_not_in_queries",
+        "planted_status_not_completed",
+        "planted_field_missing",
+        "planted_token_sum_mismatch",
+        "planted_no_usage_metadata",
+        "planted_run_key_unparsed",
     ):
-        assert messy.get(hazard, 0) >= 1, f"hazard {hazard} not planted"
-    assert golden["logs"]["total_orphan"] >= 2
+        assert weblogs.get(hazard, 0) >= 1, f"hazard {hazard} not planted"
+    assert weblogs["bad_json_lines"] == 1
     assert golden["outputs"]["bad_json_lines"] == 1
     assert golden["inputs"]["dup_input_se10"] == 1
 
 
-def test_clean_log_is_fully_strict_paired(golden: dict) -> None:
-    """The baseline file must have zero orphans, or pairing loss is unmeasurable."""
-    assert golden["logs"]["clean"].get("orphan", 0) == 0
+def test_fixture_action_mix_matches_the_real_corpus_shape(golden: dict) -> None:
+    """~85/13/2 search/open_page/find_in_page. Position-in-run analysis depends on
+    the mix being realistic, not uniform."""
+    w = golden["weblogs"]
+    assert w["action_search"] / w["calls"] > 0.7
+    assert w["action_open_page"] > 0 and w["action_find_in_page"] > 0
 
 
 def test_log_zip_has_bad_byte_and_survives_decode() -> None:

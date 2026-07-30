@@ -9,7 +9,6 @@ relative shares while pricing is unknown.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,30 +19,51 @@ DEFAULT_CONFIG_PATH = Path("config.yaml")
 
 
 @dataclass(frozen=True)
-class Pricing:
-    """Billing constants. All optional — null means "operator has not verified yet"."""
+class TierRates:
+    """Per-million-token rates for one service tier, plus the per-call search fee.
 
-    fee_per_1k_search_calls: float | None = None
+    `cached_input_per_mtok` is separate because `cache_read` is a *subset* of
+    input tokens billed at a steep discount — the formula is
+    `(input - cache_read) * input_rate + cache_read * cached_rate`. There is no
+    reasoning rate: reasoning tokens sit inside `output_tokens` and bill at the
+    output rate, so a separate constant would invite double-counting.
+    """
+
     input_per_mtok: float | None = None
+    cached_input_per_mtok: float | None = None
     output_per_mtok: float | None = None
-    search_content_flat_tokens: int | None = None
-    batch_discount: float | None = None
+    fee_per_1k_search_calls: float | None = None
+
+    def missing(self) -> list[str]:
+        return [k for k, v in vars(self).items() if v is None]
+
+
+@dataclass(frozen=True)
+class Pricing:
+    """Billing constants, per service tier.
+
+    Tiers are not a detail: flex bills near batch rates and priority roughly
+    double standard, so a single rate could be wrong by ~4x. All null until an
+    operator fills them from the billing dashboard — published list prices do
+    not reflect what an account actually pays.
+    """
+
+    tiers: dict[str, TierRates] = field(default_factory=dict)
+
+    def for_tier(self, tier: str | None) -> TierRates:
+        """Rates for one tier; empty rates when the tier is unknown or unset."""
+        return self.tiers.get(tier or "standard", TierRates())
 
     @property
     def is_verified(self) -> bool:
-        """True only when every constant has been filled in from the billing dashboard."""
-        return all(
-            v is not None
-            for v in (
-                self.fee_per_1k_search_calls,
-                self.input_per_mtok,
-                self.output_per_mtok,
-            )
-        )
+        """True only when every tier present has every rate filled in."""
+        return bool(self.tiers) and not any(r.missing() for r in self.tiers.values())
 
     def missing(self) -> list[str]:
-        """Names of the still-null constants, for the UNVERIFIED PRICING banner."""
-        return [k for k, v in vars(self).items() if v is None]
+        """`tier.field` names still null, for the UNVERIFIED PRICING banner."""
+        if not self.tiers:
+            return ["<no tiers configured>"]
+        return [f"{tier}.{k}" for tier, r in sorted(self.tiers.items()) for k in r.missing()]
 
 
 @dataclass(frozen=True)
@@ -70,7 +90,6 @@ class Config:
     pricing: Pricing = field(default_factory=Pricing)
     thresholds: Thresholds = field(default_factory=Thresholds)
     anomalies: AnomalySettings = field(default_factory=AnomalySettings)
-    noise_patterns: tuple[re.Pattern[str], ...] = ()
 
     @classmethod
     def load(cls, path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
@@ -86,16 +105,12 @@ class Config:
             db=Path(paths.get("db", "coa.sqlite")),
             reports=Path(paths.get("reports", "reports")),
             archetype_groups=Path(paths.get("archetype_groups", "archetype_groups.csv")),
-            pricing=Pricing(**(raw.get("pricing") or {})),
+            pricing=_load_pricing(raw.get("pricing")),
             thresholds=Thresholds(**(raw.get("thresholds") or {})),
             anomalies=AnomalySettings(**(raw.get("anomalies") or {})),
-            noise_patterns=tuple(re.compile(p) for p in (raw.get("noise_patterns") or [])),
         )
 
-    def is_noise(self, line: str) -> bool:
-        """Whether a line is known boilerplate.
 
-        Used by the log parser to decide that a non-ACTION line following an ACTION
-        line is *not* a wrapped continuation of it.
-        """
-        return any(p.search(line) for p in self.noise_patterns)
+def _load_pricing(raw: dict[str, Any] | None) -> Pricing:
+    """Build per-tier rates, tolerating a tier the config names but leaves empty."""
+    return Pricing(tiers={tier: TierRates(**(rates or {})) for tier, rates in (raw or {}).items()})

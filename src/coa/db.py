@@ -75,46 +75,58 @@ CREATE TABLE IF NOT EXISTS pii_terms (
 );
 CREATE INDEX IF NOT EXISTS ix_pii_se10 ON pii_terms(se10);
 
--- Only web_search_call events. Storing every timestamped line would be tens of
--- millions of rows across 2 GB of logs, and nothing downstream reads them.
-CREATE TABLE IF NOT EXISTS log_events (
-    id       INTEGER PRIMARY KEY,
-    se10     TEXT,
-    ts       TEXT,
-    level    TEXT,
-    module   TEXT,
-    ws_id    TEXT,
-    message  TEXT,
-    src_file TEXT NOT NULL,
-    src_line INTEGER NOT NULL
+-- One row per (merchant, run). `usage_metadata` gives measured token volume, so
+-- the cost model is metered rather than inferred from call counts.
+--
+-- The token fields are SUBSETS, not addends -- verified against the corpus
+-- (input + output == total holds exactly) and against OpenAI's docs:
+--   * `reasoning` is inside `output_tokens` and bills at the output rate;
+--   * `cache_read` is inside `input_tokens` and bills at the cached-input rate.
+-- Adding either as a separate line item double-counts. See CLAUDE.md
+-- "Cost model" for the formula this implies.
+CREATE TABLE IF NOT EXISTS runs (
+    id             INTEGER PRIMARY KEY,
+    se10           TEXT NOT NULL,
+    run_id         INTEGER,             -- exact, from the `run_<n>` key
+    run_key        TEXT NOT NULL,       -- verbatim key, so an odd one is still traceable
+    service_tier   TEXT,                -- standard | flex | priority: ~4x rate spread
+    input_tokens   INTEGER,
+    output_tokens  INTEGER,
+    total_tokens   INTEGER,
+    cache_read     INTEGER,             -- subset of input_tokens
+    reasoning      INTEGER,             -- subset of output_tokens
+    src_file       TEXT NOT NULL,
+    src_line       INTEGER NOT NULL,
+    UNIQUE (se10, run_key)
 );
-CREATE INDEX IF NOT EXISTS ix_log_events_se10 ON log_events(se10);
+CREATE INDEX IF NOT EXISTS ix_runs_se10 ON runs(se10);
+CREATE INDEX IF NOT EXISTS ix_runs_tier ON runs(service_tier);
 
--- One row per `action type - ...` line.
+-- One row per entry in a run's `web_search_calls` array. Merchant and run are
+-- structural keys in the source, so attribution is an exact join -- there is no
+-- pairing, no orphans, and no heuristic run assignment.
 CREATE TABLE IF NOT EXISTS search_calls (
-    id              INTEGER PRIMARY KEY,
-    se10            TEXT,               -- NULL when pairing=orphan
-    ts              TEXT,
-    ws_id           TEXT,
-    action_type     TEXT NOT NULL,      -- verbatim, even when unknown
-    raw_action_line TEXT NOT NULL,      -- retained pristine: makes `coa reparse` possible
-    raw_wrap_line   TEXT,               -- suspected wrapped continuation, kept SEPARATE so
-                                        -- raw_action_line stays byte-stable for reparse and
-                                        -- both raw forms survive (PLAN.md §3)
-    query_raw       TEXT,
-    queries_raw     TEXT,
-    queries_json    TEXT,               -- best-effort list; raw always survives
-    url             TEXT,
-    pattern         TEXT,
-    pairing         TEXT NOT NULL,      -- strict | orphan
-    parse_conf      TEXT NOT NULL,      -- clean | heuristic | failed
-    run_id          INTEGER,            -- filled by burst attribution, often NULL
-    possible_wrap   INTEGER NOT NULL DEFAULT 0,
-    src_file        TEXT NOT NULL,
-    src_line        INTEGER NOT NULL
+    id           INTEGER PRIMARY KEY,
+    se10         TEXT NOT NULL,
+    run_pk       INTEGER REFERENCES runs(id) ON DELETE CASCADE,
+    run_id       INTEGER,
+    call_index   INTEGER NOT NULL,      -- position in the array; this is what
+                                        -- position-in-run analysis uses, not a clock
+    call_id      TEXT,                  -- the API's `id`
+    action_type  TEXT NOT NULL,         -- search | open_page | find_in_page, verbatim
+    status       TEXT,                  -- `completed` is the norm; anything else is a finding
+    query_raw    TEXT,                  -- singular `query` -- the ONLY billed unit
+    queries_json TEXT,                  -- plural `queries`: sub-queries, never cost
+    url          TEXT,                  -- open_page
+    details      TEXT,                  -- find_in_page
+    raw_json     TEXT NOT NULL,         -- retained pristine: makes `coa reparse` possible
+    parse_conf   TEXT NOT NULL,         -- clean | heuristic | failed
+    src_file     TEXT NOT NULL,
+    src_line     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_search_calls_se10 ON search_calls(se10);
 CREATE INDEX IF NOT EXISTS ix_search_calls_action ON search_calls(action_type);
+CREATE INDEX IF NOT EXISTS ix_search_calls_run ON search_calls(run_pk);
 
 -- One row per (search_call, query). A call carries a singular `query` plus a
 -- plural `queries` list; `is_billed_query` marks the singular one. Cost
@@ -264,6 +276,6 @@ def forget_file(conn: sqlite3.Connection, src_file: str) -> None:
     own and go via ON DELETE CASCADE from search_calls / output_records — which is
     why `PRAGMA foreign_keys=ON` in connect() is load-bearing, not decoration.
     """
-    for table in ("log_events", "search_calls", "output_records", "merchants", "anomalies"):
+    for table in ("search_calls", "runs", "output_records", "merchants", "anomalies"):
         conn.execute(f"DELETE FROM {table} WHERE src_file = ?", (src_file,))
     conn.execute("DELETE FROM ingested_files WHERE src_file = ?", (src_file,))

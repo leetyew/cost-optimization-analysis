@@ -12,31 +12,50 @@ paths:
   # template -> archetype grouping, hand-maintained from the head-template export.
   archetype_groups: archetype_groups.csv
 
+# Rates per service tier. `usage_metadata.service_tier` selects the row, and the
+# spread is roughly 4x end to end (flex bills near batch rates, priority ~2x
+# standard), so a single set of constants could be badly wrong.
+#
+# The cost formula these feed, which must not be got wrong:
+#
+#   (input_tokens - cache_read) * input_per_mtok
+#   + cache_read               * cached_input_per_mtok
+#   + output_tokens            * output_per_mtok       <- reasoning already inside
+#   + search calls             * fee_per_1k_search_calls / 1000
+#
+# `cache_read` is a SUBSET of input_tokens and `reasoning` a SUBSET of
+# output_tokens (verified: input + output == total across the corpus, and
+# confirmed in OpenAI's docs). Adding either as its own term double-counts.
+#
+# Only `action_type: search` is believed to carry the per-call fee; open_page
+# and find_in_page consume tokens but no call fee. VERIFY on the dashboard.
+#
+# Every value stays null until an operator fills it from the billing dashboard.
+# Published list prices are not authoritative for a specific account.
 pricing:
-  # Per-call fee is believed to apply ONLY to `action type - search`.
-  # open_page / find_in_page consume tokens but no per-call fee. VERIFY THIS.
-  fee_per_1k_search_calls: null
-  input_per_mtok: null
-  output_per_mtok: null
-  # Whether a flat token block is billed per search's returned content.
-  search_content_flat_tokens: null
-  batch_discount: null
+  standard:
+    input_per_mtok: null
+    cached_input_per_mtok: null
+    output_per_mtok: null
+    fee_per_1k_search_calls: null
+  flex:
+    input_per_mtok: null
+    cached_input_per_mtok: null
+    output_per_mtok: null
+    fee_per_1k_search_calls: null
+  priority:
+    input_per_mtok: null
+    cached_input_per_mtok: null
+    output_per_mtok: null
+    fee_per_1k_search_calls: null
 
 thresholds:
-  # Run attribution: gap (seconds) between consecutive search calls that splits
-  # one merchant's calls into separate runs. The report emits a gap histogram so
-  # this can be tuned against reality rather than guessed.
-  run_burst_gap_seconds: 120
-  # A queries[] item longer than this marks the parse as `heuristic` rather than
-  # `clean` — real queries are short, long items mean the split went wrong.
-  max_sane_query_chars: 300
   # Head-template export size for the hand-grouping workflow.
   head_templates_export: 200
 
 anomalies:
-  # Raw excerpts stored per anomaly row, and context lines kept either side.
+  # Raw excerpts stored per anomaly row.
   max_excerpt_chars: 2000
-  context_lines: 3
   # Default sample count for `coa anomalies show CODE`. Kept small: the output is
   # meant to be copy-pasted back into a Claude Code session, not skimmed.
   default_sample: 5
@@ -44,20 +63,3 @@ anomalies:
   # still written (counts stay exact) but without the bulky text, so a wrong
   # assumption firing once per line cannot bloat the DB.
   max_payload_rows: 200
-
-# Lines matching any of these are treated as boilerplate noise, so they do NOT
-# trigger the "possible wrapped action line" heuristic.
-#
-# This is the main tuning lever for POSSIBLE_WRAPPED_ACTION. Any recurring
-# boilerplate line that can follow an action line must be listed here, or every
-# occurrence is reported as a suspected wrapped continuation and the signal drowns
-# in false positives. When that code fires in bulk on real data, read the samples
-# and add the pattern here rather than loosening the heuristic.
-#
-# The last two entries match the synthetic fixture boilerplate; replace them with
-# the real log's recurring lines once those are known.
-noise_patterns:
-  - '^\s*$'
-  - '^\s*[-=]{3,}\s*$'
-  - '^loading configuration\b'
-  - '^cache warm\b'

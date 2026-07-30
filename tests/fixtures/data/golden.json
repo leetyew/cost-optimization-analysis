@@ -1,59 +1,29 @@
 {
   "expected_anomaly_codes": [
-    "ACTION_FIELD_MISSING",
     "ANSWER_BLOCK_COUNT",
     "ANSWER_PARSE_MISMATCH",
     "BAD_JSON_LINE",
+    "CALL_FIELD_MISSING",
+    "CALL_STATUS_NOT_COMPLETED",
     "CITATION_SHAPE_UNEXPECTED",
     "CITATION_SOURCE_MISMATCH",
-    "COMMA_IN_QUERY",
     "DUP_INPUT_SE10",
     "DUP_OUTPUT_SE10",
     "ENCODING",
     "INPUT_OUTPUT_FIELD_CONFLICT",
-    "MULTI_QUERIES_MARKER",
-    "ORPHAN_ACTION",
-    "POSSIBLE_WRAPPED_ACTION",
+    "MISSING_USAGE_METADATA",
     "QUERY_NOT_IN_QUERIES",
     "QUESTION_SET_DRIFT",
+    "RUN_KEY_UNPARSED",
+    "TOKEN_SUM_MISMATCH",
     "UNKNOWN_ACTION_TYPE",
     "VOTE_VALUE_LIST"
   ],
-  "fingerprint": "8d546627fa5e9a61",
+  "fingerprint": "1954dc5c3ef777be",
   "inputs": {
     "dup_input_se10": 1,
     "n_records": 31,
     "n_unique_se10": 30
-  },
-  "logs": {
-    "clean": {
-      "action_open_page": 39,
-      "action_search": 173,
-      "noise": 17,
-      "strict": 212,
-      "web_search_call": 212
-    },
-    "messy": {
-      "action_find_in_page": 2,
-      "action_open_page": 1,
-      "action_search": 21,
-      "action_unknown": 1,
-      "comma_in_query": 1,
-      "embedded_quotes": 1,
-      "field_missing": 1,
-      "junk_query_item": 1,
-      "multi_queries_marker": 1,
-      "noise": 1,
-      "orphan": 2,
-      "other_timestamped": 1,
-      "possible_wrap": 1,
-      "query_not_in_queries": 1,
-      "strict": 23,
-      "web_search_call": 24
-    },
-    "total_action_lines": 237,
-    "total_orphan": 2,
-    "total_strict": 235
   },
   "n_merchants": 30,
   "n_questions": 48,
@@ -81,5 +51,26 @@
     "scale_default_3": 898,
     "text_answers": 840,
     "vote_value_list_records": 1
+  },
+  "weblogs": {
+    "action_find_in_page": 17,
+    "action_open_page": 60,
+    "action_search": 266,
+    "action_summarize_page": 1,
+    "bad_json_lines": 1,
+    "cache_read": 120162,
+    "calls": 344,
+    "input_tokens": 325811,
+    "merchants": 30,
+    "output_tokens": 59294,
+    "planted_field_missing": 1,
+    "planted_no_usage_metadata": 1,
+    "planted_query_not_in_queries": 1,
+    "planted_run_key_unparsed": 1,
+    "planted_status_not_completed": 1,
+    "planted_token_sum_mismatch": 1,
+    "planted_unknown_action": 1,
+    "reasoning": 13520,
+    "runs": 60
   }
 }
