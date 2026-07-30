@@ -335,7 +335,10 @@ def _store_run(
         (se10, run_id, run_key, *(values[k] for k in USAGE_KEYS), src_name, line_no),
     )
     stats["wl_runs"] += 1
-    if cur.lastrowid:
+    # `rowcount`, not `lastrowid`: an ignored INSERT leaves lastrowid pointing at
+    # whatever row this connection inserted last, so testing it would silently
+    # attach a duplicate run's calls to an unrelated merchant's run.
+    if cur.rowcount:
         return cur.lastrowid
     # UNIQUE(se10, run_key) collided: the same run appears twice in the corpus.
     stats["wl_dup_run"] += 1

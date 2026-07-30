@@ -213,6 +213,21 @@ def test_unparseable_run_key_is_flagged_not_silently_nulled(
     assert rows(conn, "runs")[0]["run_id"] is None
 
 
+def test_duplicate_run_is_flagged_and_never_attaches_to_another_merchant(
+    conn: sqlite3.Connection,
+) -> None:
+    """`INSERT OR IGNORE` leaves lastrowid pointing at the previous insert, so
+    testing it instead of rowcount silently attached the duplicate's calls to
+    whichever run was inserted last — here, a different merchant entirely."""
+    run(conn, [record("A"), record("B"), record("A")])
+    assert conn.execute("SELECT COUNT(*) n FROM runs").fetchone()["n"] == 2
+    mismatched = conn.execute(
+        "SELECT COUNT(*) n FROM search_calls s JOIN runs r ON r.id = s.run_pk "
+        "WHERE s.se10 != r.se10"
+    ).fetchone()["n"]
+    assert mismatched == 0
+
+
 def test_bad_json_is_recorded_and_the_file_continues(conn: sqlite3.Connection) -> None:
     stats, rec = run(conn, ['{"1": {"run_0": {trunc', record()])
     assert rec.counts["BAD_JSON_LINE"] == 1
