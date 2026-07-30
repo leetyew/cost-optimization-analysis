@@ -279,7 +279,7 @@ def test_samples_spread_across_files(conn: sqlite3.Connection) -> None:
 
 def test_fixture_tree_exists(golden: dict) -> None:
     root = gen_fixtures.DATA_ROOT
-    assert (root / "logs.zip").exists()
+    assert len(list((root / "logs" / "jsonl").glob("*.jsonl"))) == 2
     assert len(list((root / "input").glob("*.jsonl"))) == 2
     assert len(list((root / "output").glob("*.jsonl"))) == 2
 
@@ -329,10 +329,9 @@ def test_fixture_action_mix_matches_the_real_corpus_shape(golden: dict) -> None:
     assert w["action_open_page"] > 0 and w["action_find_in_page"] > 0
 
 
-def test_log_zip_has_bad_byte_and_survives_decode() -> None:
+def test_weblog_has_bad_byte_and_survives_decode() -> None:
     """The non-UTF8 byte must produce a replacement char, not an exception."""
-    with zipfile.ZipFile(gen_fixtures.DATA_ROOT / "logs.zip") as z:
-        raw = z.read("logs/messy_002.log")
+    raw = (gen_fixtures.DATA_ROOT / "logs" / "jsonl" / "calls_001.jsonl").read_bytes()
     assert b"\xff" in raw
     assert "�" in raw.decode("utf-8", errors="replace")
 
