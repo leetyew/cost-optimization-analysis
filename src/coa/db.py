@@ -166,6 +166,12 @@ CREATE TABLE IF NOT EXISTS answers (
 );
 CREATE INDEX IF NOT EXISTS ix_answers_q ON answers(qnum);
 CREATE INDEX IF NOT EXISTS ix_answers_se10 ON answers(se10);
+-- Indexing the FK column is not optional here. SQLite has no automatic index on
+-- the child side of a foreign key, so ON DELETE CASCADE scans the whole child
+-- table once per deleted parent row -- quadratic. Measured at 2k parents /
+-- 100k children: 2703 ms unindexed vs 34 ms indexed, and it worsens with scale,
+-- which would make `coa ingest --force` unusable on a real corpus.
+CREATE INDEX IF NOT EXISTS ix_answers_output ON answers(output_id);
 
 CREATE TABLE IF NOT EXISTS citations (
     id                INTEGER PRIMARY KEY,
@@ -182,6 +188,7 @@ CREATE TABLE IF NOT EXISTS citations (
 );
 CREATE INDEX IF NOT EXISTS ix_citations_domain ON citations(domain);
 CREATE INDEX IF NOT EXISTS ix_citations_q ON citations(qnum);
+CREATE INDEX IF NOT EXISTS ix_citations_output ON citations(output_id);
 
 CREATE TABLE IF NOT EXISTS votes (
     id              INTEGER PRIMARY KEY,
@@ -192,6 +199,8 @@ CREATE TABLE IF NOT EXISTS votes (
     voted_final     TEXT,
     differs         INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS ix_votes_output ON votes(output_id);
+CREATE INDEX IF NOT EXISTS ix_votes_q ON votes(qnum);
 
 -- Reserved for ground-truth labels. Empty until they exist; declared now so the
 -- analysis upgrade needs no migration.

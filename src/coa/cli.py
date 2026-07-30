@@ -16,11 +16,12 @@ Subcommands, in the order they are meant to be run:
 from __future__ import annotations
 
 import argparse
+import io
 import sqlite3
 import sys
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 from . import anomalies as anom
@@ -41,14 +42,25 @@ SOURCE_KINDS: tuple[tuple[str, str, str, Callable], ...] = (
 )
 
 
-def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[str, list[str]]]:
+def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[str, Iterable[str]]]:
     """Yield `(src_name, lines)` for every matching file under `root`.
 
-    Handles both a plain directory tree and `.zip` archives without extracting —
-    `ZipFile.open()` already streams members, so no separate source abstraction
-    is warranted. Decoding uses errors="replace" so a bad byte degrades one
-    character instead of killing the file; the caller detects the replacement
-    character and records an ENCODING anomaly.
+    Handles both a plain directory tree and `.zip` archives without extracting.
+    Decoding uses errors="replace" so a bad byte degrades one character instead
+    of killing the file; the parsers detect the replacement character and record
+    an ENCODING anomaly.
+
+    **Lines are yielded lazily, never materialized here.** `output/*.jsonl` alone
+    extrapolates to 1-2 GB on a real corpus (fixture records average 39 KB), and
+    reading a member whole costs several times its size in peak memory. That is
+    not a slow path but a hard stop: resumable ingest skips *completed* files, so
+    a single member too large to materialize fails identically on every retry.
+    Streaming works because `ZipFile.open()` and `TextIOWrapper` are both lazy,
+    and because the generator suspends inside the `with` block, keeping the
+    handle open exactly as long as the consumer is reading it.
+
+    A parser needing random access must materialize the iterator itself and say
+    why — `logs.py` does, for its context window and wrap lookahead.
 
     Zip members carrying a directory component are matched on `subdir` as well as
     `suffix`. Suffix alone was enough while logs were the only source, but input/
@@ -72,12 +84,22 @@ def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[st
                 if member_dirs and subdir not in member_dirs:
                     continue
                 with z.open(member) as fh:
-                    text = fh.read().decode("utf-8", errors="replace")
-                yield f"{zpath.name}!{member}", text.splitlines()
+                    stream = io.TextIOWrapper(fh, encoding="utf-8", errors="replace")
+                    yield f"{zpath.name}!{member}", _strip_endings(stream)
 
     for path in sorted((root / subdir).glob(f"*{suffix}")) if (root / subdir).exists() else []:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        yield f"{subdir}/{path.name}", text.splitlines()
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            yield f"{subdir}/{path.name}", _strip_endings(fh)
+
+
+def _strip_endings(stream: Iterable[str]) -> Iterator[str]:
+    """Drop line terminators, matching what `str.splitlines()` used to hand over.
+
+    Universal-newline decoding has already normalized `\\r\\n` and lone `\\r` to
+    `\\n` by this point, so stripping the tail is all that is left.
+    """
+    for line in stream:
+        yield line.rstrip("\r\n")
 
 
 def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:

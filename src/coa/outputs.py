@@ -30,7 +30,7 @@ import json
 import re
 import sqlite3
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from urllib.parse import urlsplit
@@ -219,7 +219,7 @@ def ingest_output(
     conn: sqlite3.Connection,
     rec: AnomalyRecorder,
     src_name: str,
-    lines: Sequence[str],
+    lines: Iterable[str],
     cfg: Config,
 ) -> Counter:
     """Parse one `output/*.jsonl` file. One record per line, one merchant per record."""

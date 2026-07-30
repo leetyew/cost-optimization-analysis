@@ -22,7 +22,7 @@ import json
 import re
 import sqlite3
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from .anomalies import AnomalyRecorder, note_encoding_damage
@@ -223,7 +223,7 @@ def ingest_log(
     conn: sqlite3.Connection,
     rec: AnomalyRecorder,
     src_name: str,
-    lines: Sequence[str],
+    lines: Iterable[str],
     cfg: Config,
 ) -> Counter:
     """Parse one log file into log_events / search_calls / query_instances.
@@ -231,7 +231,15 @@ def ingest_log(
     Single pass, per file. There is no cross-file ordering to exploit — the race
     is between concurrent workers writing into the same file — so each file is
     independent and can be transacted on its own.
+
+    Unlike the other two parsers this one materializes its input, because it needs
+    random access: anomalies carry +/-3 lines of surrounding context and the wrap
+    check reads one line ahead. Streaming it would take a ring buffer plus
+    lookahead rather than a plain iterator, which is why that refactor is still
+    pending — see the streaming note in CLAUDE.md. `list()` on an already-materialized
+    list is a shallow copy and costs nothing measurable at fixture scale.
     """
+    lines = list(lines)
     stats: Counter = Counter()
     span = cfg.anomalies.context_lines
     max_sane = cfg.thresholds.max_sane_query_chars

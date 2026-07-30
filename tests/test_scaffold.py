@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from coa.anomalies import AnomalyRecorder, render_samples, render_summary, samples, summary
+from coa.cli import iter_source_files
 from coa.config import Config
 from coa.db import already_ingested, connect, forget_file, mark_ingested
 
@@ -88,6 +89,36 @@ def test_schema_creates_all_tables(conn: sqlite3.Connection) -> None:
         "archetypes",
     ):
         assert expected in names, f"missing {expected}"
+
+
+def test_every_foreign_key_child_column_is_indexed(conn: sqlite3.Connection) -> None:
+    """SQLite does not index the child side of a foreign key for you.
+
+    Without an index, ON DELETE CASCADE scans the whole child table once per
+    deleted parent row, which is quadratic and makes `coa ingest --force`
+    unusable at corpus scale. Asserted structurally so a future table cannot
+    reintroduce it unnoticed.
+    """
+    tables = [
+        r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    ]
+    unindexed = []
+    for table in tables:
+        indexed = set()
+        for idx in conn.execute(f"PRAGMA index_list({table})"):
+            indexed |= {r["name"] for r in conn.execute(f"PRAGMA index_info({idx['name']})")}
+        for fk in conn.execute(f"PRAGMA foreign_key_list({table})"):
+            if fk["from"] not in indexed:
+                unindexed.append(f"{table}.{fk['from']}")
+    assert not unindexed, f"foreign-key child columns without an index: {unindexed}"
+
+
+def test_cascade_delete_uses_an_index_not_a_scan(conn: sqlite3.Connection) -> None:
+    plan = [
+        r["detail"]
+        for r in conn.execute("EXPLAIN QUERY PLAN DELETE FROM answers WHERE output_id = 1")
+    ]
+    assert any("USING" in step and "INDEX" in step for step in plan), plan
 
 
 def test_connect_is_idempotent(tmp_path: Path) -> None:
@@ -312,14 +343,38 @@ def test_zip_members_are_matched_by_subdir_but_root_members_still_load(
     """Two source kinds share `.jsonl`, so nested members must match their subdir —
     but a member at the archive root has no subdir to disagree with, and dropping
     it would ingest nothing while still exiting 0."""
-    from coa.cli import iter_source_files
-
     with zipfile.ZipFile(tmp_path / "logs.zip", "w") as z:
         z.writestr("flat.log", "a\n")
         z.writestr("logs/nested.log", "b\n")
         z.writestr("output/other.log", "c\n")
     found = {name for name, _ in iter_source_files(tmp_path, "logs", ".log")}
     assert found == {"logs.zip!flat.log", "logs.zip!logs/nested.log"}
+
+
+def test_source_lines_are_streamed_not_materialized(tmp_path: Path) -> None:
+    """A member must never be read whole.
+
+    `output/*.jsonl` extrapolates to 1-2 GB on a real corpus and materializing
+    costs several times that in peak memory. Resumable ingest does not save us:
+    it skips *completed* files, so a member too large to materialize fails the
+    same way on every retry. Asserted as "not a Sequence", which is the property
+    a `.read().splitlines()` regression would break.
+    """
+    from collections.abc import Sequence
+
+    with zipfile.ZipFile(tmp_path / "d.zip", "w") as z:
+        z.writestr("output/a.jsonl", "one\ntwo\nthree\n")
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "b.jsonl").write_text("four\r\nfive\n")
+
+    seen = {}
+    for name, lines in iter_source_files(tmp_path, "output", ".jsonl"):
+        assert not isinstance(lines, Sequence), f"{name} was materialized"
+        seen[name] = list(lines)
+
+    assert seen["d.zip!output/a.jsonl"] == ["one", "two", "three"]
+    # \r\n must arrive stripped, exactly as splitlines() used to deliver it.
+    assert seen["output/b.jsonl"] == ["four", "five"]
 
 
 def test_question_set_is_48_and_extractable() -> None:
