@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -360,8 +361,6 @@ def test_source_lines_are_streamed_not_materialized(tmp_path: Path) -> None:
     same way on every retry. Asserted as "not a Sequence", which is the property
     a `.read().splitlines()` regression would break.
     """
-    from collections.abc import Sequence
-
     with zipfile.ZipFile(tmp_path / "d.zip", "w") as z:
         z.writestr("output/a.jsonl", "one\ntwo\nthree\n")
     (tmp_path / "output").mkdir()
