@@ -28,6 +28,7 @@ from . import anomalies as anom
 from .config import Config
 from .db import already_ingested, connect, forget_file, mark_ingested
 from .inputs import ingest_input
+from .metrics import cache_picture, render_cache_report
 from .outputs import ingest_output
 from .weblogs import ingest_weblog, reparse
 
@@ -333,8 +334,13 @@ def cmd_reparse(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
-    print("analyze: not implemented until P3/P4")
-    return 0
+    """Analysis over ingested tables. Templating and archetypes land in P3."""
+    conn = connect(cfg.db)
+    try:
+        print(render_cache_report(cache_picture(conn)))
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_report(args: argparse.Namespace, cfg: Config) -> int:

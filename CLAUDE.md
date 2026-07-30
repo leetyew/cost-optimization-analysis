@@ -76,12 +76,34 @@ separately the rate would be ~59. Only `action_type: search` carries the per-cal
 priority roughly 2x standard — a ~4x spread. `config.yaml` holds rates per tier, all null
 until an operator fills them from the billing dashboard.
 
-Two cost levers that need **no change to search behaviour at all**, both visible in the
-ingest summary from the first run:
+Two cost levers that need **no change to search behaviour at all**:
 
-- **Service tier.** Batch fraud screening is exactly what flex exists for.
-- **Cache hit rate.** The 48-question prompt is a fixed prefix — an ideal caching profile.
-  A low hit rate means paying full rate for something that should be nearly free.
+- **Service tier.** Batch fraud screening is exactly what flex exists for. Visible in the
+  ingest summary from the first run.
+- **Repeat-run caching.** See below. `coa analyze` measures it.
+
+### Prompt caching (operator-confirmed structure)
+
+The 48 questions carry merchant values **inline** — `"...what type of building is at
+<zip>..."` — rather than in a separate block. That is decisive, because OpenAI caches on
+**exact prefix** only:
+
+- **Cross-merchant caching is structurally unavailable.** The first question containing a
+  merchant field ends the shared prefix; everything after it differs per merchant. And
+  caching needs **≥1024 tokens** with *no partial credit*, so a short static preamble caches
+  nothing whatsoever. Do not report a low hit rate here as waste — it is the expected
+  consequence of the prompt shape.
+- **Same-merchant repeat runs are the live lever.** `run_1+` reuse `run_0`'s byte-identical
+  prompt, so this works regardless of inline placeholders. It depends only on the two runs
+  falling inside the cache TTL (30 min on current models). With ~2 runs/merchant this caps
+  around half of all input tokens, and the fix is scheduling, not prompt surgery.
+
+`coa analyze` splits the hit rate by `run_id` precisely to tell these apart, and measures
+the actual shared prefix against the 1024-token floor.
+
+Restructuring the prompt (static questions first, merchant values in a tail block) would
+unlock cross-merchant caching, but it is **not answer-preserving by construction** and needs
+A/B validation before it is recommended. Do not put it in a report as a free win.
 
 ## The air-gap (shapes everything)
 
