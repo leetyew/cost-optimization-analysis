@@ -27,12 +27,6 @@ FIXTURE_ROOT = Path(gen_fixtures.FIXTURE_ROOT)
 GOLDEN = FIXTURE_ROOT / "golden.json"
 
 
-@pytest.fixture(scope="module")
-def golden() -> dict:
-    """Generate the fixture tree once, return its golden counts."""
-    return gen_fixtures.write_fixtures()
-
-
 @pytest.fixture
 def conn(tmp_path: Path) -> sqlite3.Connection:
     c = connect(tmp_path / "t.sqlite")

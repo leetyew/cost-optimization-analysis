@@ -31,16 +31,67 @@ memory. 2 GB is small enough that stdlib `sqlite3` handles all storage and analy
 ## The air-gap (shapes everything)
 
 Real data lives in an environment Claude Code **never sees**. Development happens entirely
-against synthetic fixtures. Reality reaches the parser through exactly one channel: the
-operator runs `coa anomalies show CODE`, pastes the output back into a Claude Code session,
-the parser gets patched, and the new case is added to the fixture generator as a regression.
+against synthetic fixtures. Reality reaches this repo through exactly **two** channels, and
+both are narrow:
 
-Consequences:
+1. **The anomaly loop.** The operator runs `coa anomalies show CODE`, pastes the output back
+   into a Claude Code session, the parser gets patched, and the new case joins the fixture
+   generator as a regression.
+2. **The operator saying so.** Format facts stated in conversation — "the answer is 1-5,
+   defaulting to 3" — with no anomaly attached. This channel carries the highest-value
+   information in the project and leaves no artifact of its own.
+
+### Capture rule (channel 2 has no memory of its own)
+
+An operator-relayed fact is **unrecoverable** once the transcript is gone: it cannot be
+re-derived from the code, the fixtures, or git history, and nobody can go and look it up.
+So before the session ends, every such fact lands in **three** places:
+
+- **"Known real-data format facts" below** — the durable, shared record.
+- **`tests/fixtures/gen_fixtures.py`** — as a rendered shape, so a parser that regresses
+  against it fails a test rather than a production run.
+- **Session memory** (`memory/` + `MEMORY.md`) — provenance and confidence: what is
+  confirmed, what is still assumed, and what would settle it.
+
+A fact recorded in only one of the three is one refactor away from being lost.
+
+### Consequences
+
 - `tests/fixtures/gen_fixtures.py` **is** reality during development. Over-invest in it.
   Adding a newly-discovered case must be a ~3-line diff plus a golden count.
 - The anomaly CLI output is a UX surface, not a formatting detail. If it emits 5000 lines,
   the loop breaks. Keep it deduped, capped, and paste-ready.
 - Assume reality contradicts at least some format assumption in `PLAN.md`. Budget for it.
+- **Prefer a parser that tolerates every candidate shape and reports which one it saw**
+  over one that asks the operator to confirm a shape up front. A counter in the ingest
+  summary settles the question from data in one run; a question costs a round-trip and can
+  be answered from a faulty memory. `evidence shapes` in the summary exists for exactly this.
+
+## Known real-data format facts
+
+Operator-relayed (channel 2), not derivable from anything in this repo. The fixture
+generator renders all of it; `src/coa/outputs.py` parses it.
+
+| Fact | Status |
+|---|---|
+| Many of the 48 questions answer on a **1-5 scale**, defaulting to **3 when evidence is insufficient** | confirmed |
+| Evidence is returned **only when the answer is ≤ 3**; otherwise NULL | confirmed |
+| Free-text questions (registered address, building type) return **`value \| NULL`** — a literal `NULL` is a first-class *answer*, not only an evidence state | confirmed |
+| The answer-format instruction is part of the **user prompt**, attached to the questions | confirmed |
+| When no evidence is required, whether the line reads `Evidence. NULL`, a bare `Evidence.`, or is **omitted entirely** | **unconfirmed** — all three parsed; see `evidence shapes` in the ingest summary |
+| Whether a scale answer is a bare digit or a digit followed by prose | **unconfirmed** — `answer_text` stored verbatim, scale value derived, never assumed |
+| Whether `answer_dict` holds their parse of the same prose or a normalized form | **unconfirmed** — `agree_with_dict` measures it; `ANSWER_PARSE_MISMATCH` is aggregated per (record, run) so a systematic difference cannot flood |
+
+Two consequences that are easy to get backwards:
+
+- **`is_null` keys on the answer, never on the evidence.** Evidence being NULL is the
+  *specified outcome* for a scale answer above 3 — it means the search found nothing
+  adverse, which is a good result, not a missing one. Reading it as a null answer inverts
+  the headline metric.
+- **The drop-candidate signal is "the answer carried no information"**, which unifies both
+  regimes: `answer == NULL` for text questions, `answer == 3 with NULL evidence` for scale
+  ones. Both are exactly measurable, so the finding survives the "nothing unverifiable"
+  invariant. P2 stores the raw material; P4 computes the rate.
 
 ## Stack
 

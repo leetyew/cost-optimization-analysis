@@ -25,7 +25,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from .anomalies import AnomalyRecorder
+from .anomalies import AnomalyRecorder, note_encoding_damage
 from .config import Config
 
 TIMESTAMPED_RE = re.compile(
@@ -48,7 +48,6 @@ WEB_SEARCH_MARKER = "Response tool type - web_search_call"
 ACTION_PREFIX = "action type -"
 QUERIES_MARKER = ", queries - "
 QUERY_PREFIX = "query - "
-REPLACEMENT_CHAR = "�"
 
 # `find in page` and `find_in_page` are both observed. Normalizing on the way in
 # means grouping works without every downstream query knowing about the alias;
@@ -244,15 +243,14 @@ def ingest_log(
         line_no = i + 1
         stats["lines"] += 1
 
-        if REPLACEMENT_CHAR in raw:
+        if note_encoding_damage(
+            rec,
+            src_name,
+            line_no,
+            raw,
+            detail="undecodable byte replaced with U+FFFD; line parsed anyway",
+        ):
             stats["encoding_damaged"] += 1
-            rec.record(
-                "ENCODING",
-                src_file=src_name,
-                src_line=line_no,
-                raw_excerpt=raw,
-                detail="undecodable byte replaced with U+FFFD; line parsed anyway",
-            )
 
         ts_match = TIMESTAMPED_RE.match(raw)
         if ts_match:

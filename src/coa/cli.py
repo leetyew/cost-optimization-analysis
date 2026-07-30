@@ -20,13 +20,25 @@ import sqlite3
 import sys
 import zipfile
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from . import anomalies as anom
 from .config import Config
 from .db import already_ingested, connect, forget_file, mark_ingested
+from .inputs import ingest_input
 from .logs import ingest_log, reparse
+from .outputs import ingest_output
+
+# (kind, subdir, suffix, parser). Order matters: input/ is ingested before output/
+# because output records duplicate a few merchant fields, and comparing them
+# against an already-populated merchants table is what makes "input/ takes
+# precedence" automatic instead of a precedence rule someone has to maintain.
+SOURCE_KINDS: tuple[tuple[str, str, str, Callable], ...] = (
+    ("log", "logs", ".log", ingest_log),
+    ("input", "input", ".jsonl", ingest_input),
+    ("output", "output", ".jsonl", ingest_output),
+)
 
 
 def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[str, list[str]]]:
@@ -37,6 +49,11 @@ def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[st
     is warranted. Decoding uses errors="replace" so a bad byte degrades one
     character instead of killing the file; the caller detects the replacement
     character and records an ENCODING anomaly.
+
+    Zip members are matched on `subdir` as well as `suffix`. Suffix alone was
+    enough while logs were the only source, but input/ and output/ are both
+    `.jsonl` — a zip holding either would otherwise be ingested twice, once as
+    each kind.
     """
     if not root.exists():
         return
@@ -44,10 +61,13 @@ def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[st
     for zpath in sorted(root.glob("*.zip")):
         with zipfile.ZipFile(zpath) as z:
             for member in sorted(z.namelist()):
-                if member.endswith(suffix) and not member.endswith("/"):
-                    with z.open(member) as fh:
-                        text = fh.read().decode("utf-8", errors="replace")
-                    yield f"{zpath.name}!{member}", text.splitlines()
+                if not member.endswith(suffix) or member.endswith("/"):
+                    continue
+                if subdir not in Path(member).parts[:-1]:
+                    continue
+                with z.open(member) as fh:
+                    text = fh.read().decode("utf-8", errors="replace")
+                yield f"{zpath.name}!{member}", text.splitlines()
 
     for path in sorted((root / subdir).glob(f"*{suffix}")) if (root / subdir).exists() else []:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -65,31 +85,63 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
     totals: Counter = Counter()
     seen = skipped = 0
     try:
-        for src_name, lines in iter_source_files(cfg.data_root, "logs", ".log"):
-            seen += 1
-            if already_ingested(conn, src_name):
-                if not args.force:
-                    skipped += 1
-                    continue
-                forget_file(conn, src_name)
-            rec = anom.AnomalyRecorder(
-                conn, "logs", cfg.anomalies.max_excerpt_chars, cfg.anomalies.max_payload_rows
-            )
-            try:
-                stats = ingest_log(conn, rec, src_name, lines, cfg)
-                rec.flush()
-                mark_ingested(conn, src_name, "log", stats["lines"])
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            totals.update(stats)
-            print(f"  {src_name}: {stats['lines']} lines, {stats['action']} actions")
+        for kind, subdir, suffix, parser in SOURCE_KINDS:
+            for src_name, lines in iter_source_files(cfg.data_root, subdir, suffix):
+                seen += 1
+                if already_ingested(conn, src_name):
+                    if not args.force:
+                        skipped += 1
+                        continue
+                    forget_file(conn, src_name)
+                stats = _ingest_one(conn, cfg, kind, parser, src_name, lines)
+                totals.update(stats)
+                # Every parser reports `lines`, so the merged Counter holds the
+                # cross-kind total. Keep a per-kind tally too, or the log section
+                # of the summary silently reports jsonl lines as log lines.
+                totals[f"{kind}_lines"] += stats["lines"]
+                print(f"  {src_name}: {_file_line(kind, stats)}")
 
         print(_ingest_summary(conn, totals, seen, skipped))
         return 0
     finally:
         conn.close()
+
+
+def _ingest_one(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    kind: str,
+    parser: Callable,
+    src_name: str,
+    lines: list[str],
+) -> Counter:
+    """Parse one source file inside its own transaction.
+
+    `mark_ingested` lands in the same transaction as the rows, so a crash mid-file
+    leaves neither — the re-run redoes exactly that file rather than the whole
+    2 GB corpus, and never double-counts one that finished.
+    """
+    rec = anom.AnomalyRecorder(
+        conn, f"{kind}s", cfg.anomalies.max_excerpt_chars, cfg.anomalies.max_payload_rows
+    )
+    try:
+        stats = parser(conn, rec, src_name, lines, cfg)
+        rec.flush()
+        mark_ingested(conn, src_name, kind, stats["lines"])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return stats
+
+
+def _file_line(kind: str, stats: Counter) -> str:
+    """Per-file progress line, in the units that matter for that source kind."""
+    if kind == "log":
+        return f"{stats['lines']} lines, {stats['action']} actions"
+    if kind == "input":
+        return f"{stats['in_records']} merchants, {stats['in_pii_terms']} pii terms"
+    return f"{stats['out_records']} records, {stats['out_runs']} runs"
 
 
 def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skipped: int) -> str:
@@ -100,7 +152,11 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         "",
         "INGEST SUMMARY",
         f"  files              {seen} seen, {skipped} already done",
-        f"  lines              {totals['lines']}",
+        f"  lines              {totals['lines']} "
+        f"(logs {totals['log_lines']}, input {totals['input_lines']}, "
+        f"output {totals['output_lines']})",
+        "",
+        "  LOGS",
         f"  timestamped        {totals['timestamped']} "
         f"(web_search_call {totals['web_search_call']})",
         f"  action lines       {paired}",
@@ -113,9 +169,57 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         f"  possible wraps     {totals['possible_wrap']}",
         f"  encoding damage    {totals['encoding_damaged']} line(s)",
         "",
+        "  INPUTS",
+        f"    merchants        {totals['in_records']} "
+        f"({totals['in_dup_se10']} duplicate se10 kept-first, "
+        f"{totals['in_bad_json']} unparseable line(s))",
+        f"    pii terms        {totals['in_pii_terms']} "
+        f"({totals['in_no_pii_terms']} merchant(s) yielded none)",
+        "",
+        "  OUTPUTS",
+        f"    records          {totals['out_records']} "
+        f"({totals['out_dup_se10']} duplicate se10 both-kept, "
+        f"{totals['out_bad_json']} unparseable line(s))",
+        f"    runs             {totals['out_runs']} "
+        f"({totals['out_answer_blocks']} answer blocks, "
+        f"{totals['out_answers_from_dict']} recovered from answer_dict)",
+        f"    short runs       {totals['out_short_runs']} "
+        f"(fewer answer blocks than the canonical question set)",
+        f"    answer/dict      {totals['out_answer_disagreements']} answer(s) differ "
+        f"from answer_dict",
+        f"    citations        {totals['out_prose_citations']} prose + "
+        f"{totals['out_dict_citations']} citation_evidence "
+        f"({totals['out_empty_placeholders']} empty placeholder(s), "
+        f"{totals['out_citation_mismatch']} qnum mismatch(es))",
+        f"    votes            {totals['out_votes']} "
+        f"({totals['out_votes_differ']} majority/final differ, "
+        f"{totals['out_empty_voted_final']} record(s) with empty voted_final)",
+        _evidence_shapes(totals),
+        "",
     ]
     out.append(anom.render_summary(anom.summary(conn)))
     return "\n".join(out)
+
+
+def _evidence_shapes(totals: Counter) -> str:
+    """Which Evidence rendering the corpus actually uses.
+
+    Real data is expected to answer many questions on a 1-5 scale and return
+    Evidence only when the answer is <= 3, but whether the no-evidence case writes
+    `NULL`, a bare label, or omits the line entirely is unconfirmed. The parser
+    accepts all three and reports the split, so the first real ingest settles it
+    instead of a guess baked into a regex.
+    """
+    shapes = ("evidence_present", "evidence_null", "evidence_empty", "evidence_absent")
+    if not sum(totals[s] for s in shapes):
+        return "    evidence shapes  (no answer blocks parsed)"
+    parts = ", ".join(f"{s.removeprefix('evidence_')} {totals[s]}" for s in shapes)
+    return (
+        f"    evidence shapes  {parts}\n"
+        f"                     (`absent` = no Evidence line at all. If that is 0 on real\n"
+        f"                     data, the optional-Evidence branch never ran — see CLAUDE.md\n"
+        f"                     'Known real-data format facts'.)"
+    )
 
 
 def cmd_reparse(args: argparse.Namespace, cfg: Config) -> int:

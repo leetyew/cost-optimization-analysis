@@ -24,6 +24,16 @@ DEFAULT_MAX_EXCERPT = 2000
 # Per-code cap on rows that carry excerpt/context payload. See record().
 DEFAULT_MAX_PAYLOAD_ROWS = 200
 
+# What errors="replace" leaves behind. Every source file is decoded that way, so a
+# bad byte degrades one character instead of killing the file — but the damage has
+# to be reported or it silently corrupts whatever field it landed in.
+#
+# Both spellings are checked: a JSON exporter writing with ensure_ascii=True emits
+# the escape sequence rather than the character, and looking only for the character
+# would make the corruption invisible in exactly the files that carry merchant PII.
+REPLACEMENT_CHAR = "�"
+REPLACEMENT_ESCAPE = "\\ufffd"
+
 
 class AnomalyRecorder:
     """Buffers anomaly rows and flushes them to SQLite.
@@ -96,6 +106,21 @@ class AnomalyRecorder:
             self._buf,
         )
         self._buf.clear()
+
+
+def note_encoding_damage(
+    rec: AnomalyRecorder, src_file: str, src_line: int, raw: str, *, detail: str
+) -> bool:
+    """Record ENCODING if `raw` carries a replacement char. Returns whether it did.
+
+    Shared by all three parsers rather than repeated: a damaged byte inside a JSON
+    string value still parses, so without this the corruption reaches `pii_terms`
+    and every template derived from it with nothing to trace it back to.
+    """
+    if REPLACEMENT_CHAR not in raw and REPLACEMENT_ESCAPE not in raw.lower():
+        return False
+    rec.record("ENCODING", src_file=src_file, src_line=src_line, raw_excerpt=raw, detail=detail)
+    return True
 
 
 def _truncate(text: str | None, limit: int) -> str | None:

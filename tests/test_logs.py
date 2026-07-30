@@ -234,11 +234,6 @@ def test_billed_query_is_exactly_one_per_search_call(conn: sqlite3.Connection) -
 # --- golden corpus ---------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def golden() -> dict:
-    return gen_fixtures.write_fixtures()
-
-
 @pytest.fixture
 def ingested(tmp_path: Path, golden: dict) -> sqlite3.Connection:
     """Full corpus ingested, exactly as `coa ingest` would."""
