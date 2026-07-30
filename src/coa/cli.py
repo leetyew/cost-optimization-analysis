@@ -28,7 +28,12 @@ from . import anomalies as anom
 from .config import Config
 from .db import already_ingested, connect, forget_file, mark_ingested
 from .inputs import ingest_input
-from .metrics import cache_picture, render_cache_report
+from .metrics import (
+    cache_picture,
+    open_page_overlap,
+    render_cache_report,
+    render_open_page_report,
+)
 from .outputs import ingest_output
 from .weblogs import ingest_weblog, reparse
 
@@ -338,6 +343,8 @@ def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
     conn = connect(cfg.db)
     try:
         print(render_cache_report(cache_picture(conn)))
+        print()
+        print(render_open_page_report(open_page_overlap(conn)))
         return 0
     finally:
         conn.close()

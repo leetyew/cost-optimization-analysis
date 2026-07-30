@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from coa.db import connect
-from coa.metrics import CACHE_MIN_TOKENS, cache_picture, render_cache_report
+from coa.metrics import (
+    CACHE_MIN_TOKENS,
+    cache_picture,
+    open_page_overlap,
+    render_cache_report,
+    render_open_page_report,
+)
 
 
 @pytest.fixture
@@ -97,3 +103,55 @@ def test_corpus_cache_picture_is_computable(corpus) -> None:
     assert picture.n_runs == 60
     assert picture.n_prompts == 31
     assert 0.0 <= picture.hit_rate <= 1.0
+
+
+def add_citation(conn: sqlite3.Connection, se10: str, url: str) -> None:
+    conn.execute(
+        "INSERT INTO output_records (id, se10, src_file, src_line) VALUES (1, ?, 'o', 1) "
+        "ON CONFLICT DO NOTHING",
+        (se10,),
+    )
+    conn.execute(
+        "INSERT INTO citations (se10, output_id, url, source) VALUES (?, 1, ?, 'prose')",
+        (se10, url),
+    )
+
+
+def add_open_page(conn: sqlite3.Connection, se10: str, url: str) -> None:
+    conn.execute(
+        "INSERT INTO search_calls (se10, call_index, action_type, url, raw_json, parse_conf, "
+        "src_file, src_line) VALUES (?, 0, 'open_page', ?, '{}', 'clean', 'f', 1)",
+        (se10, url),
+    )
+
+
+def test_open_page_overlap_is_scoped_per_merchant(conn: sqlite3.Connection) -> None:
+    """The same URL cited for two merchants is two facts, not one."""
+    add_citation(conn, "A", "https://x.test/1")
+    add_open_page(conn, "A", "https://x.test/1")
+    add_open_page(conn, "B", "https://x.test/1")  # opened for B, not cited by B
+    overlap = open_page_overlap(conn)
+    assert (overlap.cited_urls, overlap.both) == (1, 1)
+    assert overlap.opened_urls == 2
+
+
+def test_citation_never_opened_is_not_counted(conn: sqlite3.Connection) -> None:
+    """Models cite from result snippets without opening; that is the expected case."""
+    add_citation(conn, "A", "https://cited-only.test/1")
+    add_open_page(conn, "A", "https://opened-only.test/2")
+    overlap = open_page_overlap(conn)
+    assert overlap.both == 0
+    assert "cited them straight from" in render_open_page_report(overlap)
+
+
+def test_full_coverage_still_disclaims_search_attribution(conn: sqlite3.Connection) -> None:
+    """Even at 100%, this links a citation to a page open, never to the search."""
+    add_citation(conn, "A", "https://x.test/1")
+    add_open_page(conn, "A", "https://x.test/1")
+    out = render_open_page_report(open_page_overlap(conn))
+    assert "does NOT reach the search" in out
+
+
+def test_no_citations_does_not_divide_by_zero(conn: sqlite3.Connection) -> None:
+    assert open_page_overlap(conn).covered == 0.0
+    assert "no citations ingested" in render_open_page_report(open_page_overlap(conn))

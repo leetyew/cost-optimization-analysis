@@ -96,6 +96,80 @@ def cache_picture(conn: sqlite3.Connection) -> CachePicture:
     )
 
 
+@dataclass(frozen=True)
+class OpenPageOverlap:
+    """How much of the citation set can be reached through `open_page` URLs."""
+
+    cited_urls: int
+    opened_urls: int
+    both: int
+
+    @property
+    def covered(self) -> float:
+        return self.both / self.cited_urls if self.cited_urls else 0.0
+
+
+def open_page_overlap(conn: sqlite3.Connection) -> OpenPageOverlap:
+    """Test the "if it was cited, the page was opened" hypothesis against the corpus.
+
+    If it holds, `citation.url == open_page.url` links citations to calls exactly,
+    with no new field and no heuristic. It probably does not hold — web-search
+    models cite from result snippets without opening the page — but it is cheap to
+    measure and the answer decides how much weight the open_page path can carry.
+
+    Note what this can and cannot establish. Even at full coverage it links a
+    citation to the *page open*, never to the *search that surfaced the page* —
+    that hop exists only in `web_search_call.action.sources`, which is opt-in and
+    absent from this corpus. So a high number is a finding about open_page value,
+    not a substitute for search attribution.
+
+    Compared per (se10, url): the same URL cited for two merchants is two facts.
+    """
+    row = conn.execute(
+        """
+        WITH cited AS (
+            SELECT DISTINCT se10, url FROM citations
+            WHERE url IS NOT NULL AND url != ''
+        ), opened AS (
+            SELECT DISTINCT se10, url FROM search_calls
+            WHERE action_type = 'open_page' AND url IS NOT NULL AND url != ''
+        )
+        SELECT
+            (SELECT COUNT(*) FROM cited)  AS cited_urls,
+            (SELECT COUNT(*) FROM opened) AS opened_urls,
+            (SELECT COUNT(*) FROM cited c
+             JOIN opened o ON o.se10 = c.se10 AND o.url = c.url) AS both
+        """
+    ).fetchone()
+    return OpenPageOverlap(row["cited_urls"], row["opened_urls"], row["both"])
+
+
+def render_open_page_report(o: OpenPageOverlap) -> str:
+    """Format the overlap, and say plainly what it does and does not license."""
+    if not o.cited_urls:
+        return "CITATION <-> OPEN_PAGE\n  (no citations ingested)"
+    out = [
+        "CITATION <-> OPEN_PAGE",
+        f"  distinct cited URLs      {o.cited_urls:,}",
+        f"  distinct opened URLs     {o.opened_urls:,}",
+        f"  cited AND opened         {o.both:,}  ({o.covered:.1%} of cited URLs)",
+        "",
+    ]
+    if o.covered >= 0.8:
+        out += [
+            "  Most citations were opened first, so citation -> open_page call is an exact",
+            "  link for the bulk of the corpus. It still does NOT reach the search that",
+            "  surfaced the page — only action.sources does that.",
+        ]
+    else:
+        out += [
+            "  Most cited URLs were never opened, so the model cited them straight from",
+            "  search-result snippets. open_page cannot carry citation attribution; it",
+            "  measures the value of page opens only.",
+        ]
+    return "\n".join(out)
+
+
 def render_cache_report(p: CachePicture) -> str:
     """Format the cache picture, naming the fix each number implies."""
     if not p.n_runs:
