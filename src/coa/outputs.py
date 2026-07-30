@@ -280,10 +280,13 @@ def _ingest_record(
     """Store one output record and everything hanging off it."""
     dup_flag = _flag_duplicate(conn, rec, src_name, line_no, se10, raw, stats)
 
+    # Indexing `question` is guarded on every step: a dict raises KeyError and an
+    # empty inner list raises IndexError, either of which would kill the file.
     question = record.get("question") or []
-    user_prompt = ""
-    if question and isinstance(question[0], (list, tuple)) and len(question[0]) > 1:
-        user_prompt = question[0][1] or ""
+    prompts = question[0] if isinstance(question, list) and question else None
+    prompts = prompts if isinstance(prompts, (list, tuple)) else ()
+    system_prompt = prompts[0] if len(prompts) > 0 else None
+    user_prompt = (prompts[1] if len(prompts) > 1 else "") or ""
     questions = extract_questions(user_prompt)
     _sync_questions(conn, rec, src_name, line_no, se10, questions, stats)
 
@@ -295,7 +298,7 @@ def _ingest_record(
         (
             se10,
             n_runs if isinstance(n_runs, int) else None,
-            question[0][0] if question and isinstance(question[0], (list, tuple)) else None,
+            system_prompt if isinstance(system_prompt, str) else None,
             user_prompt or None,
             _hash(raw),
             dup_flag,

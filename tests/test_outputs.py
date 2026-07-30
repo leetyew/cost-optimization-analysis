@@ -360,6 +360,14 @@ def test_record_without_se10_is_flagged(conn: sqlite3.Connection) -> None:
     assert recorder.counts["OUTPUT_NO_SE10"] == 1
 
 
+@pytest.mark.parametrize("question", [[[]], {"a": 1}, ["sys", "usr"], None, "text"])
+def test_malformed_question_field_never_crashes(conn: sqlite3.Connection, question: object) -> None:
+    """Indexing `question` blind killed the whole file: a dict raised KeyError and
+    an empty inner list raised IndexError, taking every later record with them."""
+    stats, _ = run(conn, [record(question=question)])
+    assert stats["out_records"] == 1
+
+
 # --- golden corpus ---------------------------------------------------------
 
 

@@ -306,6 +306,22 @@ def test_output_records_parse_as_json_except_planted_bad_line() -> None:
     assert bad == 1
 
 
+def test_zip_members_are_matched_by_subdir_but_root_members_still_load(
+    tmp_path: Path,
+) -> None:
+    """Two source kinds share `.jsonl`, so nested members must match their subdir —
+    but a member at the archive root has no subdir to disagree with, and dropping
+    it would ingest nothing while still exiting 0."""
+    from coa.cli import iter_source_files
+
+    with zipfile.ZipFile(tmp_path / "logs.zip", "w") as z:
+        z.writestr("flat.log", "a\n")
+        z.writestr("logs/nested.log", "b\n")
+        z.writestr("output/other.log", "c\n")
+    found = {name for name, _ in iter_source_files(tmp_path, "logs", ".log")}
+    assert found == {"logs.zip!flat.log", "logs.zip!logs/nested.log"}
+
+
 def test_question_set_is_48_and_extractable() -> None:
     """The extraction regex from PLAN.md §4 must recover all 48 questions."""
     qs = gen_fixtures.build_questions()

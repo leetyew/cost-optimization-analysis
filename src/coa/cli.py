@@ -50,10 +50,11 @@ def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[st
     character instead of killing the file; the caller detects the replacement
     character and records an ENCODING anomaly.
 
-    Zip members are matched on `subdir` as well as `suffix`. Suffix alone was
-    enough while logs were the only source, but input/ and output/ are both
-    `.jsonl` — a zip holding either would otherwise be ingested twice, once as
-    each kind.
+    Zip members carrying a directory component are matched on `subdir` as well as
+    `suffix`. Suffix alone was enough while logs were the only source, but input/
+    and output/ are both `.jsonl` — a zip holding either would otherwise be
+    ingested twice, once as each kind. Members at the archive root are still
+    accepted; see the comment below.
     """
     if not root.exists():
         return
@@ -63,7 +64,12 @@ def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[st
             for member in sorted(z.namelist()):
                 if not member.endswith(suffix) or member.endswith("/"):
                     continue
-                if subdir not in Path(member).parts[:-1]:
+                # Only filter when there is a directory to filter on. A member at
+                # the archive root has no subdir to disagree with, and skipping it
+                # would ingest nothing at all while still exiting 0 — a far worse
+                # failure than ingesting it twice, which at least fires DUP_*.
+                member_dirs = Path(member).parts[:-1]
+                if member_dirs and subdir not in member_dirs:
                     continue
                 with z.open(member) as fh:
                     text = fh.read().decode("utf-8", errors="replace")
