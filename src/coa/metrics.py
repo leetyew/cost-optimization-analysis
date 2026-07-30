@@ -75,24 +75,29 @@ def cache_picture(conn: sqlite3.Connection) -> CachePicture:
         )
     ]
 
-    prompts = [
-        r["question_user_prompt"]
-        for r in conn.execute(
-            "SELECT question_user_prompt FROM output_records "
-            "WHERE question_user_prompt IS NOT NULL AND question_user_prompt != ''"
-        )
-    ]
-    prefix = os.path.commonprefix(prompts) if prompts else ""
-    avg = sum(len(p) for p in prompts) // len(prompts) if prompts else 0
+    # Folded one prompt at a time rather than collected into a list. A common
+    # prefix only ever shrinks, so the running value plus the current row is all
+    # that is needed — and holding ~19k prompts costs ~150 MB at fixture prompt
+    # sizes, several times that at real ones, for no benefit.
+    prefix: str | None = None
+    total_chars = n_prompts = 0
+    for row in conn.execute(
+        "SELECT question_user_prompt AS p FROM output_records "
+        "WHERE question_user_prompt IS NOT NULL AND question_user_prompt != ''"
+    ):
+        prompt = row["p"]
+        n_prompts += 1
+        total_chars += len(prompt)
+        prefix = prompt if prefix is None else os.path.commonprefix([prefix, prompt])
 
     return CachePicture(
         n_runs=totals["n"],
         input_tokens=totals["i"],
         cache_read=totals["c"],
         by_run=by_run,
-        prefix_chars=len(prefix),
-        avg_prompt_chars=avg,
-        n_prompts=len(prompts),
+        prefix_chars=len(prefix or ""),
+        avg_prompt_chars=total_chars // n_prompts if n_prompts else 0,
+        n_prompts=n_prompts,
     )
 
 
