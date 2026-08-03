@@ -109,6 +109,10 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
     # Counted over EVERY merchant, not the schema sample: "is it ever non-null"
     # cannot be answered from 200 rows when the answer might be "0.3% of 19,349".
     label_values: dict[str, Counter] = {k: Counter() for k in _LABEL_CANDIDATE_KEYS}
+    # Tracked over every record, unlike `present`. A key that is mainly null could
+    # easily be absent from the first 200 and present at record 5,000, and reporting
+    # "not in the schema" for a key we have counted values for is self-contradictory.
+    label_seen: set[str] = set()
     for row in conn.execute("SELECT raw_json FROM merchants"):
         try:
             record = json.loads(row["raw_json"])
@@ -121,7 +125,10 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
             n_schema += 1
         n_sampled += 1
         for key in _LABEL_CANDIDATE_KEYS:
-            value = record.get(key)
+            if key not in record:
+                continue
+            label_seen.add(key)
+            value = record[key]
             if value not in (None, ""):
                 label_values[key][str(value)] += 1
 
@@ -162,11 +169,11 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
     extra = f" ... (+{len(keys) - _MAX_KEYS} more)" if len(keys) > _MAX_KEYS else ""
     out.append(_line("input keys seen", f"{len(keys)} over {n_schema} records"))
     out.append(f"    {shown}{extra}")
-    out += _label_candidate_lines(label_values, n_sampled, present)
+    out += _label_candidate_lines(label_values, n_sampled, label_seen)
     return out
 
 
-def _label_candidate_lines(values: dict[str, Counter], n: int, present: set[str]) -> list[str]:
+def _label_candidate_lines(values: dict[str, Counter], n: int, seen: set[str]) -> list[str]:
     """Fill rate for keys that might hold a ground-truth outcome.
 
     Reports a rate rather than a yes/no because "mainly null" and "entirely null"
@@ -179,8 +186,8 @@ def _label_candidate_lines(values: dict[str, Counter], n: int, present: set[str]
     """
     out = ["", "  LABEL CANDIDATES (unmapped keys that may hold ground truth)"]
     for key in _LABEL_CANDIDATE_KEYS:
-        if key not in present:
-            out.append(_line(f"  {key}", "not in the schema sample"))
+        if key not in seen:
+            out.append(_line(f"  {key}", "key absent from every merchant record"))
             continue
         counts = values[key]
         filled = sum(counts.values())

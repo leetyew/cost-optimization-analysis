@@ -177,7 +177,30 @@ def test_label_candidate_absent_from_schema_says_so(conn: sqlite3.Connection) ->
         ("1", json.dumps({"se10": "1", "se_toc_name": "Acme"})),
     )
     out = health_report(conn)
-    assert "not in the schema sample" in out
+    assert "key absent from every merchant record" in out
+
+
+def test_label_candidate_present_only_past_the_schema_sample_is_still_counted(
+    conn: sqlite3.Connection,
+) -> None:
+    """Presence is tracked over every record, not the 200-record schema sample.
+
+    A mainly-null key is exactly the kind that appears first at record 5,000, and
+    calling it absent while reporting a non-zero count contradicts itself.
+    """
+    for i in range(250):
+        record = {"se10": str(i)}
+        if i == 240:
+            record["se_not_good_seller_ind"] = "Y"
+        conn.execute(
+            "INSERT INTO merchants (se10, raw_json) VALUES (?, ?)", (str(i), json.dumps(record))
+        )
+    out = health_report(conn)
+    assert (
+        "key absent from every merchant record"
+        not in out.split("LABEL CANDIDATES")[1].split("\n")[1]
+    )
+    assert "1 of 250 non-null" in out
 
 
 def test_high_cardinality_label_values_are_not_printed(conn: sqlite3.Connection) -> None:
