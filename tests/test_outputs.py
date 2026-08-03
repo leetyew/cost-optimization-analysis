@@ -41,15 +41,26 @@ def record(**over) -> dict:
     base = {
         "se10": "1000000001",
         "n_runs": 1,
-        "question": [[SYSTEM, prompt("Is it legitimate?", "What is the address?")]],
-        "answers": {
+        "questions": [[SYSTEM, prompt("Is it legitimate?", "What is the address?")]],
+        "answer": {
             "run_0": "Q1. t\nA1. 2\nEvidence. seen ([src](https://a.example/1))\n\nQ2. t\nA2. NULL"
         },
-        "answer_dict": {"run_0": {"A1": "2", "A2": "NULL"}, "citation_evidence": {"run_0": []}},
-        "voted_majority": {"A1": "Yes", "A2": "No"},
-        "voted_final": {"A1": "Yes", "A2": "No"},
+        # The vote maps are siblings of the run keys inside answer_dict, not
+        # top-level; citation_evidence is top-level. Both per the confirmed shape.
+        "answer_dict": {
+            "run_0": {"A1": "2", "A2": "NULL"},
+            "voted_majority": {"A1": "Yes", "A2": "No"},
+            "voted_final": {"A1": "Yes", "A2": "No"},
+        },
+        "citation_evidence": {"run_0": []},
     }
     return {**base, **over}
+
+
+def with_votes(**maps) -> dict:
+    """A record whose answer_dict carries the given vote maps."""
+    base = record()
+    return record(answer_dict={**base["answer_dict"], **maps})
 
 
 @pytest.fixture
@@ -182,7 +193,7 @@ def test_disagreement_is_one_anomaly_per_run_not_per_answer(
 
 
 def test_short_run_is_flagged_with_the_missing_qnums(conn: sqlite3.Connection) -> None:
-    rec = record(answers={"run_0": "Q1. t\nA1. 2\nEvidence. x"})
+    rec = record(answer={"run_0": "Q1. t\nA1. 2\nEvidence. x"})
     _, recorder = run(conn, [rec])
     assert recorder.counts["ANSWER_BLOCK_COUNT"] == 1
     detail = conn.execute(
@@ -195,7 +206,7 @@ def test_unparseable_run_key_is_flagged_not_silently_nulled(
     conn: sqlite3.Connection,
 ) -> None:
     """A NULL run_id disables every per-run metric; that must never be quiet."""
-    rec = record(answers={"batch7": "Q1. t\nA1. 2\nEvidence. x\n\nQ2. t\nA2. NULL"})
+    rec = record(answer={"batch7": "Q1. t\nA1. 2\nEvidence. x\n\nQ2. t\nA2. NULL"})
     _, recorder = run(conn, [rec])
     assert recorder.counts["RUN_KEY_UNPARSED"] == 1
     assert {a["run_id"] for a in rows(conn, "answers")} == {None}
@@ -213,7 +224,7 @@ def test_prose_citation_records_domain_and_position(conn: sqlite3.Connection) ->
 
 
 def test_empty_placeholder_is_marked_not_dropped(conn: sqlite3.Connection) -> None:
-    rec = record(answers={"run_0": "Q1. t\nA1. 2\nEvidence. found ([]())\n\nQ2. t\nA2. NULL"})
+    rec = record(answer={"run_0": "Q1. t\nA1. 2\nEvidence. found ([]())\n\nQ2. t\nA2. NULL"})
     run(conn, [rec])
     (cite,) = rows(conn, "citations", "WHERE source = 'markdown_prose'")
     assert cite["empty_placeholder"] == 1 and cite["url"] is None
@@ -223,16 +234,8 @@ def test_list_shaped_citation_is_flagged_and_every_url_kept(
     conn: sqlite3.Connection,
 ) -> None:
     rec = record(
-        answer_dict={
-            "run_0": {"A1": "2", "A2": "NULL"},
-            "citation_evidence": {
-                "run_0": [
-                    {
-                        "a_key": "A1",
-                        "citation": ["https://a.example/1", "https://b.example/2"],
-                    }
-                ]
-            },
+        citation_evidence={
+            "run_0": [{"a_key": "A1", "citation": ["https://a.example/1", "https://b.example/2"]}]
         }
     )
     _, recorder = run(conn, [rec])
@@ -243,15 +246,18 @@ def test_list_shaped_citation_is_flagged_and_every_url_kept(
 
 def test_unknown_shape_is_excluded_from_the_cross_check(conn: sqlite3.Connection) -> None:
     """We do not know its true URL set, so a difference is unknown, not loss."""
-    rec = record(
-        answer_dict={
-            "run_0": {"A1": "2", "A2": "NULL"},
-            "citation_evidence": {"run_0": [{"a_key": "A1", "citation": {"url": "x"}}]},
-        }
-    )
+    rec = record(citation_evidence={"run_0": [{"a_key": "A1", "citation": {"url": "x"}}]})
     _, recorder = run(conn, [rec])
     assert recorder.counts["CITATION_SHAPE_UNEXPECTED"] == 1
     assert "CITATION_SOURCE_MISMATCH" not in recorder.counts
+
+
+def test_non_list_citation_entries_are_flagged_not_skipped(conn: sqlite3.Connection) -> None:
+    """A run keyed by a_key instead of listed would drop its citations silently."""
+    rec = record(citation_evidence={"run_0": {"A1": {"citation": "https://a.example/1"}}})
+    _, recorder = run(conn, [rec])
+    assert recorder.counts["CITATION_ENTRIES_NOT_A_LIST"] == 1
+    assert not rows(conn, "citations", "WHERE source = 'citation_evidence'")
 
 
 def test_empty_prose_placeholder_and_null_dict_citation_agree(
@@ -259,11 +265,8 @@ def test_empty_prose_placeholder_and_null_dict_citation_agree(
 ) -> None:
     """Same fact recorded twice. Comparing them raw would fire on every record."""
     rec = record(
-        answers={"run_0": "Q1. t\nA1. 2\nEvidence. found ([]())\n\nQ2. t\nA2. NULL"},
-        answer_dict={
-            "run_0": {"A1": "2", "A2": "NULL"},
-            "citation_evidence": {"run_0": [{"a_key": "A1", "citation": None}]},
-        },
+        answer={"run_0": "Q1. t\nA1. 2\nEvidence. found ([]())\n\nQ2. t\nA2. NULL"},
+        citation_evidence={"run_0": [{"a_key": "A1", "citation": None}]},
     )
     _, recorder = run(conn, [rec])
     assert "CITATION_SOURCE_MISMATCH" not in recorder.counts
@@ -279,8 +282,19 @@ def test_citation_dropped_from_dict_but_present_in_prose_is_caught(
 # --- votes -----------------------------------------------------------------
 
 
+def test_vote_maps_are_read_from_inside_answer_dict(conn: sqlite3.Connection) -> None:
+    """Top-level vote maps gave `votes 0` on the real corpus — a silent empty table."""
+    top_level = record()
+    top_level["answer_dict"] = {"run_0": top_level["answer_dict"]["run_0"]}
+    top_level["voted_majority"] = {"A1": "Yes", "A2": "No"}
+    top_level["voted_final"] = {"A1": "Yes", "A2": "No"}
+    _, recorder = run(conn, [top_level])
+    assert not rows(conn, "votes")
+    assert recorder.counts["OUTPUT_NO_VOTES"] == 1
+
+
 def test_majority_and_final_divergence_is_flagged(conn: sqlite3.Connection) -> None:
-    run(conn, [record(voted_final={"A1": "Yes", "A2": "Yes"})])
+    run(conn, [with_votes(voted_final={"A1": "Yes", "A2": "Yes"})])
     differs = {v["qnum"]: v["differs"] for v in rows(conn, "votes")}
     assert differs == {1: 0, 2: 1}
 
@@ -288,7 +302,7 @@ def test_majority_and_final_divergence_is_flagged(conn: sqlite3.Connection) -> N
 def test_empty_voted_final_is_treated_as_absent_and_counted(
     conn: sqlite3.Connection,
 ) -> None:
-    stats, recorder = run(conn, [record(voted_final={})])
+    stats, recorder = run(conn, [with_votes(voted_final={})])
     assert stats["out_empty_voted_final"] == 1
     assert {v["voted_final"] for v in rows(conn, "votes")} == {None}
     assert {v["differs"] for v in rows(conn, "votes")} == {0}
@@ -299,7 +313,7 @@ def test_mixed_vote_list_fires_once_per_qnum_not_once_per_field(
     conn: sqlite3.Connection,
 ) -> None:
     """The same unresolved value normally appears in BOTH majority and final."""
-    rec = record(
+    rec = with_votes(
         voted_majority={"A1": ["Yes", "No"], "A2": ["NULL", "NULL"]},
         voted_final={"A1": ["Yes", "No"], "A2": ["NULL", "NULL"]},
     )
@@ -335,7 +349,7 @@ def test_question_set_drift_is_detected_against_the_canonical_set(
 ) -> None:
     drifted = record(
         se10="1000000002",
-        question=[[SYSTEM, prompt("Is it legitimate?", "Has it changed its legal name?")]],
+        questions=[[SYSTEM, prompt("Is it legitimate?", "Has it changed its legal name?")]],
     )
     _, recorder = run(conn, [record(), drifted])
     assert recorder.counts["QUESTION_SET_DRIFT"] == 1
@@ -360,12 +374,49 @@ def test_record_without_se10_is_flagged(conn: sqlite3.Connection) -> None:
     assert recorder.counts["OUTPUT_NO_SE10"] == 1
 
 
-@pytest.mark.parametrize("question", [[[]], {"a": 1}, ["sys", "usr"], None, "text"])
-def test_malformed_question_field_never_crashes(conn: sqlite3.Connection, question: object) -> None:
-    """Indexing `question` blind killed the whole file: a dict raised KeyError and
+@pytest.mark.parametrize("questions", [[[]], {"a": 1}, ["sys", "usr"], None, "text"])
+def test_malformed_question_field_never_crashes(
+    conn: sqlite3.Connection, questions: object
+) -> None:
+    """Indexing `questions` blind killed the whole file: a dict raised KeyError and
     an empty inner list raised IndexError, taking every later record with them."""
-    stats, _ = run(conn, [record(question=question)])
+    stats, recorder = run(conn, [record(questions=questions)])
     assert stats["out_records"] == 1
+    # Storing the shell silently is what let an empty `questions` table survive an
+    # entire real ingest. The shape that was actually seen must reach the operator.
+    assert recorder.counts["OUTPUT_NO_QUESTIONS"] == 1
+
+
+def test_citation_evidence_read_from_the_top_level_not_answer_dict(
+    conn: sqlite3.Connection,
+) -> None:
+    """The nesting PLAN.md §4 assumed yielded zero dict citations on the real corpus.
+
+    Nesting it under `answer_dict` must now be reported as absent rather than found,
+    because a silent zero here made CITATION_SOURCE_MISMATCH read as agreement.
+    """
+    entry = {"a_key": "A1", "citation": "https://a.example/1"}
+    top = record(citation_evidence={"run_0": [entry]})
+    _, recorder = run(conn, [top])
+    assert [c["url"] for c in rows(conn, "citations", "WHERE source = 'citation_evidence'")] == [
+        "https://a.example/1"
+    ]
+    assert "OUTPUT_NO_CITATION_EVIDENCE" not in recorder.counts
+
+    nested = record(
+        se10="1000000002", answer_dict={"run_0": {}, "citation_evidence": {"run_0": []}}
+    )
+    del nested["citation_evidence"]
+    _, recorder = run(conn, [nested])
+    assert recorder.counts["OUTPUT_NO_CITATION_EVIDENCE"] == 1
+
+
+def test_absent_vote_maps_are_flagged_not_silently_empty(conn: sqlite3.Connection) -> None:
+    """`votes 0` on the real corpus read as "no disagreements", not "no data"."""
+    bare = record(answer_dict={"run_0": {"A1": "2", "A2": "NULL"}})
+    _, recorder = run(conn, [bare])
+    assert not rows(conn, "votes")
+    assert recorder.counts["OUTPUT_NO_VOTES"] == 1
 
 
 # --- golden corpus ---------------------------------------------------------
@@ -441,18 +492,16 @@ def test_no_answer_row_is_left_without_provenance(corpus) -> None:
     assert orphaned == 0
 
 
-@pytest.mark.parametrize("answers", [None, {}, [], "text", {"run_0": "Q1. t\nA1. 2"}])
-def test_record_without_usable_answers_is_flagged(
-    conn: sqlite3.Connection, answers: object
-) -> None:
+@pytest.mark.parametrize("answer", [None, {}, [], "text", {"run_0": "Q1. t\nA1. 2"}])
+def test_record_without_usable_answers_is_flagged(conn: sqlite3.Connection, answer: object) -> None:
     """2000 records yielding 0 runs must not look like a normal ingest.
 
     Without this the only signal was an unprinted counter, so a renamed or
-    restructured `answers` key would produce an empty analysis that reported
+    restructured `answer` key would produce an empty analysis that reported
     itself as success.
     """
-    _, recorder = run(conn, [record(answers=answers)])
-    expected = 0 if isinstance(answers, dict) and answers else 1
+    _, recorder = run(conn, [record(answer=answer)])
+    expected = 0 if isinstance(answer, dict) and answer else 1
     assert recorder.counts.get("OUTPUT_NO_ANSWERS", 0) == expected
 
 
@@ -461,36 +510,21 @@ def test_no_answers_anomaly_names_the_keys_that_were_present(
 ) -> None:
     """The operator needs to see what the record DOES have, or diagnosing the
     rename costs another round-trip across the air gap."""
-    run(conn, [record(answers=None)])
+    run(conn, [record(answer=None)])
     detail = conn.execute(
         "SELECT detail FROM anomalies WHERE code = 'OUTPUT_NO_ANSWERS'"
     ).fetchone()["detail"]
-    assert "voted_majority" in detail and "answer_dict" in detail
+    assert "citation_evidence" in detail and "answer_dict" in detail
 
 
-def test_singular_answer_key_is_the_real_one(conn: sqlite3.Connection) -> None:
-    """Real records use `answer`; PLAN.md §4 said `answers`. Both must work."""
+def test_plural_answers_key_is_not_read(conn: sqlite3.Connection) -> None:
+    """`answer` is the confirmed key; PLAN.md §4's `answers` must not resurface.
+
+    Reading the wrong spelling is what emptied the answer map on the first real
+    ingest, so the failure has to be loud rather than a silently empty table.
+    """
     rec = record()
-    rec["answer"] = rec.pop("answers", rec.get("answer"))
+    rec["answers"] = rec.pop("answer")
     stats, recorder = run(conn, [rec])
-    assert stats["out_runs"] == 1
-    assert stats["out_answers_key_answer"] == 1
-    assert "OUTPUT_NO_ANSWERS" not in recorder.counts
-
-
-def test_plural_answers_key_still_parses(conn: sqlite3.Connection) -> None:
-    """The fixture spelling from PLAN.md must not regress into a silent zero."""
-    rec = record()
-    rec["answers"] = rec.pop("answer", rec.get("answers"))
-    stats, _ = run(conn, [rec])
-    assert stats["out_runs"] == 1
-    assert stats["out_answers_key_answers"] == 1
-
-
-def test_singular_wins_when_both_are_present(conn: sqlite3.Connection) -> None:
-    """Deterministic precedence, since `answer` is the confirmed spelling."""
-    rec = record()
-    rec["answer"] = {"run_0": "Q1. t\nA1. 4\n\nQ2. t\nA2. NULL"}
-    rec["answers"] = {"run_9": "Q1. t\nA1. 1\nEvidence. x"}
-    run(conn, [rec])
-    assert {a["run_id"] for a in rows(conn, "answers")} == {0}
+    assert stats["out_runs"] == 0
+    assert recorder.counts["OUTPUT_NO_ANSWERS"] == 1

@@ -538,14 +538,26 @@ def build_output_record(
     record = {
         "se10": m["se10"],
         "n_runs": n_runs,
-        "question": [[SYSTEM_PROMPT, user_prompt(questions)]],
+        # Plural `questions`, holding [[system, user]] (operator-confirmed
+        # 2026-08-04). PLAN.md §4 said `question`, and reading that spelling left
+        # the canonical question table empty for every record of the real corpus.
+        "questions": [[SYSTEM_PROMPT, user_prompt(questions)]],
         # Real records use the singular `answer` (operator-confirmed 2026-08-03);
-        # PLAN.md §4 said `answers`. The generator follows reality, and
-        # outputs.ANSWER_KEYS still tolerates the other spelling.
+        # PLAN.md §4 said `answers`.
         "answer": answers,
-        "answer_dict": {**answer_dict, "citation_evidence": citation_evidence},
-        "voted_majority": voted_majority,
-        "voted_final": voted_final,
+        # The vote maps are siblings of the run keys INSIDE answer_dict, not
+        # top-level (operator-confirmed 2026-08-04). Putting them at the top level
+        # is what let the fixtures agree with a parser that found `votes 0` on real
+        # data — the same wrong-nesting bug as citation_evidence.
+        "answer_dict": {
+            **answer_dict,
+            "voted_majority": voted_majority,
+            "voted_final": voted_final,
+        },
+        # A TOP-LEVEL sibling of answer_dict (operator-confirmed 2026-08-04), not a
+        # key inside it as PLAN.md §4 assumed. Nesting it here is precisely what let
+        # the fixtures agree with a parser that found nothing on real data.
+        "citation_evidence": citation_evidence,
         # Convenience keys duplicated from input/. input/ wins on conflict, so a
         # divergence here must surface as INPUT_OUTPUT_FIELD_CONFLICT, never be
         # written over the merchant row.
@@ -661,7 +673,7 @@ def write_fixtures() -> dict:
     drifted = list(questions)
     drifted[7] = "Has the merchant changed its legal name recently?\n" + TEXT_INSTRUCTION
     drift_rec = next(r for r in records_b if r["se10"] == merchants[19]["se10"])
-    drift_rec["question"] = [[SYSTEM_PROMPT, user_prompt(drifted)]]
+    drift_rec["questions"] = [[SYSTEM_PROMPT, user_prompt(drifted)]]
 
     # Duplicate se10 across output files, with differing run counts so the
     # "use the record with most runs" tie-break is actually exercised.

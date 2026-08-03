@@ -38,7 +38,7 @@ from .metrics import (
     render_open_page_report,
     tier_usage,
 )
-from .outputs import ANSWER_KEYS, ingest_output
+from .outputs import ingest_output
 from .weblogs import ingest_weblog, reparse
 
 # (kind, subdir, suffix, parser). Order matters: input/ is ingested before output/
@@ -241,15 +241,13 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         f"    records          {totals['out_records']} "
         f"({totals['out_dup_se10']} duplicate se10 both-kept, "
         f"{totals['out_bad_json']} unparseable line(s))",
-        "    answer key       "
-        + (
-            ", ".join(
-                f"{k} {totals[f'out_answers_key_{k}']}"
-                for k in ANSWER_KEYS
-                if totals[f"out_answers_key_{k}"]
-            )
-            or f"NONE FOUND — {totals['out_no_answers']} record(s) yielded no answers"
-        ),
+        # Every top-level key the parser depends on, as positive confirmation. An
+        # absent one used to show up only as a downstream zero — an empty questions
+        # table, no dict citations, no votes — which reads as "clean", not "missing".
+        f"    keys not found   questions {totals['out_no_questions']}, "
+        f"answer {totals['out_no_answers']}, "
+        f"citation_evidence {totals['out_no_citation_evidence']}, "
+        f"votes {totals['out_no_votes']}  (of {totals['out_records']} records)",
         f"    runs             {totals['out_runs']} "
         f"({totals['out_answer_blocks']} answer blocks, "
         f"{totals['out_answers_from_dict']} recovered from answer_dict)",

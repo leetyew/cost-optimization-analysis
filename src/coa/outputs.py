@@ -71,10 +71,18 @@ CONVENIENCE_KEYS: dict[str, str] = {
 # Anomaly details are pasted into a chat session, so lists inside them are capped.
 MAX_LISTED = 12
 
-# The per-run answer map. `answer` is what real records use (operator-confirmed
-# 2026-08-03); `answers` is what PLAN.md §4 specified and the fixtures were built
-# to. Both are accepted and the one seen is counted — see `_find_answers`.
-ANSWER_KEYS: tuple[str, ...] = ("answer", "answers")
+# Top-level record keys, operator-confirmed 2026-08-03/04. PLAN.md §4 got three of
+# the four wrong, and each miss was silent: `answers` plural emptied the answer map,
+# `question` singular emptied the canonical question set, and nesting
+# `citation_evidence` inside `answer_dict` yielded zero dict citations corpus-wide.
+QUESTION_KEY = "questions"
+ANSWER_KEY = "answer"
+CITATION_EVIDENCE_KEY = "citation_evidence"
+
+# The vote maps live INSIDE `answer_dict`, alongside its `run_<n>` keys — not at the
+# record top level as PLAN.md §4 assumed. Reading the top level gave `votes 0` on the
+# real corpus, which read as "no disagreements" rather than "never loaded".
+VOTE_KEYS: tuple[str, str] = ("voted_majority", "voted_final")
 
 
 @dataclass(frozen=True)
@@ -105,26 +113,42 @@ class _Ctx:
     stats: Counter
 
 
-def _find_answers(record: dict) -> tuple[dict, str | None, object]:
-    """Locate the per-run answer map, tolerating both observed spellings.
+def _find_prompts(record: dict) -> tuple[str | None, str]:
+    """`(system_prompt, user_prompt)` from `questions`, shaped `[[system, user]]`.
 
-    Real data uses `answer`; PLAN.md §4 specified `answers` and the fixtures were
-    built to it. Rather than swap one guess for another, both are accepted and the
-    winner is counted, so the ingest summary reports which spelling the corpus
-    actually uses instead of anyone having to remember.
-
-    Order matters: `answer` is checked first because it is the confirmed one.
-    Returns `(map, key_used, raw_value_seen)` — the raw value feeds the anomaly
-    detail when nothing usable is found.
+    Every index is guarded. The value is nested two deep, so a dict, a bare string
+    or a short inner list would each raise a different exception and kill the whole
+    file — invariant 1 says malformed input degrades to an anomaly, never a crash.
+    An unusable shape returns empty and the caller reports what it actually saw.
     """
-    raw: object = None
-    for key in ANSWER_KEYS:
-        value = record.get(key)
-        if isinstance(value, dict) and value:
-            return value, key, value
-        if value is not None and raw is None:
-            raw = value  # remember the first present-but-unusable value
-    return {}, None, raw
+    value = record.get(QUESTION_KEY)
+    prompts = value[0] if isinstance(value, list) and value else None
+    if not isinstance(prompts, (list, tuple)):
+        return None, ""
+    system = prompts[0] if len(prompts) > 0 else None
+    user = prompts[1] if len(prompts) > 1 else None
+    return (
+        (system if isinstance(system, str) else None),
+        user if isinstance(user, str) else "",
+    )
+
+
+def _shape(value: object) -> str:
+    """Compact description of a value, for anomaly details across the air gap.
+
+    The operator sees only what an anomaly prints, so a detail saying a field was
+    "missing" is far less useful than one saying it was a 3-element list. Dict keys
+    are included because a wrong key name is the failure this keeps catching.
+    """
+    if value is None:
+        return "absent"
+    if isinstance(value, dict):
+        return f"dict{{{_capped(sorted(map(str, value)))}}}"
+    if isinstance(value, (list, tuple)):
+        return f"{type(value).__name__}[{len(value)}]"
+    if isinstance(value, str):
+        return f"str[{len(value)}]"
+    return type(value).__name__
 
 
 def extract_questions(user_prompt: str) -> dict[int, str]:
@@ -205,8 +229,8 @@ def _capped(values: Sequence[object]) -> str:
 def _run_answer_map(answer_dict: dict, run_key: str) -> dict[int, str]:
     """Their parsed answers for one run, keyed by qnum.
 
-    `answer_dict` mixes per-run keys with a `citation_evidence` sibling, so the
-    caller cannot simply iterate it.
+    `answer_dict` mixes per-run keys with the `voted_majority` / `voted_final`
+    siblings, so the caller cannot simply iterate it.
     """
     raw = answer_dict.get(run_key)
     if not isinstance(raw, dict):
@@ -307,14 +331,27 @@ def _ingest_record(
     """Store one output record and everything hanging off it."""
     dup_flag = _flag_duplicate(conn, rec, src_name, line_no, se10, raw, stats)
 
-    # Indexing `question` is guarded on every step: a dict raises KeyError and an
-    # empty inner list raises IndexError, either of which would kill the file.
-    question = record.get("question") or []
-    prompts = question[0] if isinstance(question, list) and question else None
-    prompts = prompts if isinstance(prompts, (list, tuple)) else ()
-    system_prompt = prompts[0] if len(prompts) > 0 else None
-    user_prompt = (prompts[1] if len(prompts) > 1 else "") or ""
+    system_prompt, user_prompt = _find_prompts(record)
     questions = extract_questions(user_prompt)
+    if not questions:
+        # Previously a bare counter that nothing printed, which is how an empty
+        # `questions` table survived a whole real ingest unnoticed. The canonical
+        # question set is the denominator of the primary deliverable, so its absence
+        # has to shout — and name what was actually there, because the likely cause
+        # is another key-name drift like the one that emptied it in the first place.
+        stats["out_no_questions"] += 1
+        rec.record(
+            "OUTPUT_NO_QUESTIONS",
+            se10=se10,
+            src_file=src_name,
+            src_line=line_no,
+            detail=(
+                "no `Q<n>.` question text found, so this record seeds no canonical "
+                f"question set; `{QUESTION_KEY}` is {_shape(record.get(QUESTION_KEY))}, "
+                f"expected [[system, user]]; top-level keys present: "
+                f"{_capped(sorted(record))}"
+            ),
+        )
     _sync_questions(conn, rec, src_name, line_no, se10, questions, stats)
 
     n_runs = record.get("n_runs")
@@ -336,9 +373,8 @@ def _ingest_record(
     ctx = _Ctx(conn, rec, src_name, line_no, se10, cur.lastrowid, stats)
     stats["out_records"] += 1
 
-    answers, answers_key, raw_answers = _find_answers(record)
-    if answers_key:
-        stats[f"out_answers_key_{answers_key}"] += 1
+    answers = record.get(ANSWER_KEY)
+    answers = answers if isinstance(answers, dict) else {}
     answer_dict = record.get("answer_dict")
     answer_dict = answer_dict if isinstance(answer_dict, dict) else {}
     if isinstance(n_runs, int) and n_runs != len(answers):
@@ -348,7 +384,7 @@ def _ingest_record(
     # nothing to the per-question rates that are the primary deliverable. Silently
     # storing the shell and moving on is exactly the failure this codebase keeps
     # hitting, so it speaks — and names the keys actually present, because the
-    # likely cause is the map living under a name ANSWER_KEYS does not list.
+    # likely cause is the map having moved to another key again.
     if not answers:
         stats["out_no_answers"] += 1
         rec.record(
@@ -360,10 +396,8 @@ def _ingest_record(
             # can fire once per record. Printing it twice doubles the paste-back
             # payload for nothing, and that channel is the whole operator loop.
             detail=(
-                f"no usable answer map under any of {list(ANSWER_KEYS)} (found "
-                f"{type(raw_answers).__name__}"
-                + (f", {len(raw_answers)} entries" if isinstance(raw_answers, dict) else "")
-                + f"); top-level keys present: {_capped(sorted(record))}"
+                f"`{ANSWER_KEY}` is {_shape(record.get(ANSWER_KEY))}, expected a map "
+                f"keyed by run; top-level keys present: {_capped(sorted(record))}"
             ),
         )
 
@@ -378,8 +412,27 @@ def _ingest_record(
             ctx, run_key, text if isinstance(text, str) else "", answer_dict, canonical
         )
 
-    _store_dict_citations(ctx, answer_dict, prose_urls)
-    _store_votes(ctx, record)
+    evidence = record.get(CITATION_EVIDENCE_KEY)
+    if not isinstance(evidence, dict) or not evidence:
+        # Reading the wrong location produced zero dict citations across the entire
+        # real corpus with no anomaly and not even a counter, so
+        # CITATION_SOURCE_MISMATCH read as "the sources agree" when in truth one of
+        # them was never loaded. An absent field is now stated, not inferred.
+        stats["out_no_citation_evidence"] += 1
+        rec.record(
+            "OUTPUT_NO_CITATION_EVIDENCE",
+            se10=se10,
+            src_file=src_name,
+            src_line=line_no,
+            detail=(
+                f"`{CITATION_EVIDENCE_KEY}` is {_shape(evidence)}, expected a map "
+                "keyed by run; the prose-vs-dict cross-check cannot run for this "
+                f"record. Top-level keys present: {_capped(sorted(record))}"
+            ),
+        )
+        evidence = {}
+    _store_dict_citations(ctx, evidence, prose_urls)
+    _store_votes(ctx, answer_dict)
     _check_convenience_keys(ctx, record)
 
 
@@ -438,8 +491,7 @@ def _sync_questions(
     per-file ingest stays correct — the parser itself never sees more than one file.
     """
     if not questions:
-        stats["out_no_questions"] += 1
-        return
+        return  # already counted and flagged by the caller, which can see the record
 
     rows = conn.execute("SELECT qnum, text FROM questions").fetchall()
     if not rows:
@@ -637,15 +689,30 @@ def _store_prose_citations(
 
 
 def _store_dict_citations(
-    ctx: _Ctx, answer_dict: dict, prose_urls: dict[str, dict[int, set[str]]]
+    ctx: _Ctx, evidence: dict, prose_urls: dict[str, dict[int, set[str]]]
 ) -> None:
-    """`citation_evidence` entries, then the prose-vs-dict cross-check."""
-    evidence = answer_dict.get("citation_evidence")
-    if not isinstance(evidence, dict):
-        return
+    """`citation_evidence` entries, then the prose-vs-dict cross-check.
 
+    Takes the already-located map rather than a container to search: the caller owns
+    the lookup and the anomaly for a missing one, so this stays a pure store step.
+    """
     for run_key, entries in evidence.items():
         if not isinstance(entries, list):
+            # A dict keyed by a_key is the shape this would most plausibly be
+            # instead, and skipping it silently is how a whole run's citations
+            # would vanish while the summary still looked healthy.
+            ctx.stats["out_citation_entries_not_a_list"] += 1
+            ctx.rec.record(
+                "CITATION_ENTRIES_NOT_A_LIST",
+                se10=ctx.se10,
+                src_file=ctx.src_file,
+                src_line=ctx.src_line,
+                detail=(
+                    f"run {run_key}: citation_evidence entries are "
+                    f"{_shape(entries)}, expected a list; this run's dict citations "
+                    "are not stored and its cross-check does not run"
+                ),
+            )
             continue
         run_id = _run_id(run_key)
         rows: list[tuple] = []
@@ -752,15 +819,36 @@ def _cross_check_citations(
         )
 
 
-def _store_votes(ctx: _Ctx, record: dict) -> None:
-    """`voted_majority` vs `voted_final` per qnum, with list values normalized."""
-    majority = record.get("voted_majority")
+def _store_votes(ctx: _Ctx, answer_dict: dict) -> None:
+    """`voted_majority` vs `voted_final` per qnum, with list values normalized.
+
+    Both live inside `answer_dict` (see VOTE_KEYS), which is why this takes the dict
+    rather than the record.
+    """
+    majority = answer_dict.get("voted_majority")
     majority = majority if isinstance(majority, dict) else {}
-    final = record.get("voted_final")
+    final = answer_dict.get("voted_final")
     final = final if isinstance(final, dict) else {}
     if not final:
         # §4: an empty voted_final is treated as absent and counted, not flagged.
         ctx.stats["out_empty_voted_final"] += 1
+    if not majority and not final:
+        # Both absent means the votes table stays empty and the majority-vs-final
+        # cross-check never runs. On the real corpus `votes` came back 0, which read
+        # as "no disagreements" when it actually meant "no data" — the same
+        # ambiguity that hid the citation_evidence lookup.
+        ctx.stats["out_no_votes"] += 1
+        ctx.rec.record(
+            "OUTPUT_NO_VOTES",
+            se10=ctx.se10,
+            src_file=ctx.src_file,
+            src_line=ctx.src_line,
+            detail=(
+                "neither vote map is usable, so this record contributes no votes; "
+                + ", ".join(f"{k}={_shape(answer_dict.get(k))}" for k in VOTE_KEYS)
+                + f"; answer_dict keys present: {_capped(sorted(answer_dict))}"
+            ),
+        )
 
     rows = []
     for key in sorted(set(majority) | set(final), key=lambda k: (_qnum(k) or 0, str(k))):

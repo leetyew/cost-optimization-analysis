@@ -67,37 +67,49 @@ Adding `reasoning` or `cache_read` as separate terms double-counts and inflates 
 baseline — the worst possible error in a document arguing another team should spend less.
 `TOKEN_SUM_MISMATCH` fires if the arithmetic ever stops holding.
 
-**The billing unit is UNRESOLVED, and it is a ~4x swing.** Treat every absolute cost figure
-as provisional until the dashboard reconciliation below is done.
+### The billing unit is RESOLVED (operator-supplied charge, 2026-08-03)
 
-- *Structurally*, one `web_search_call` is one item with one id, one status, and one
-  `queries` array. `queries` sits inside a single call.
-- *For billing*, OpenAI support (developer forum, not official docs) states the tool "can
-  sometimes run multiple internal sub-searches for a single prompt… each one is counted as
-  a separate, billable call", with a reported case billing ~2.5x the visible invocations.
-  A constant `len(queries) == 4` is consistent with those sub-searches being visible here.
+The operator reported the web-search line item for the corpus period: **$6,946.95**. At the
+$10.00/1K rate that is exactly **694,695 billed units** — to the cent, and to the unit, the
+total number of `web_search_calls` in the corpus:
 
-| If billing is | Billed searches | At $10/1K |
+```
+592,710 search + 87,854 open_page + 14,131 find_in_page = 694,695 calls
+694,695 x $0.01                                         = $6,946.95   EXACT
+```
+
+Two facts follow, and they point in opposite cost directions:
+
+1. **Billing is per visible call, NOT per `queries` entry.** The ~2.37M `queries` entries
+   would have billed ~$23,700 — off by 3.4x. The OpenAI developer-forum claim about
+   internally-billed sub-searches does not apply to this account. `is_billed_query` on the
+   singular `query` is now a verified convention, not a stated one.
+2. **All three action types carry the per-call fee.** `open_page` and `find_in_page` are
+   billed exactly like `search`. Charging only `search` understates the fee by
+   101,985 calls = **$1,019.85 (+17.2%)**.
+
+The alternatives require rates nobody publishes, which is what makes this decisive rather
+than merely consistent — two unknowns and one equation, but only one solution lands on both
+a round published rate and an independently measured integer:
+
+| Hypothesis | Implied rate | Verdict |
 |---|---|---|
-| per visible call | 592,710 | ~$5.9k |
-| per `queries` entry | ~2.37M | ~$23.7k |
+| all calls bill | **$10.0000/1K** | exact, and the published rate |
+| only `search` bills | $11.7207/1K | not a list price |
+| per `queries` entry | $2.9312/1K | not a list price |
 
-An earlier note here claimed this was settled because 592,710 / 19,269 / ~2 runs ≈ 14 per
-run matches the operator's "~14 searches per run". **That reasoning is circular** if the ~14
-figure was itself derived from these logs — it confirms 14 *visible calls*, not 14 *billed
-searches*.
+Standing assumption: the $6,946.95 covers exactly the corpus period and nothing else. The
+exactness makes contamination implausible — an unrelated window would have to land on
+694,695 units. `CALL_STATUS_NOT_COMPLETED` is 0 on the corpus (all 694,695 completed), so
+non-completed-call billing cannot be confounding the match — and has no instances to settle.
 
-**RESOLVE THIS FIRST:** take one day's call count and reconcile against the billing
-dashboard. The dashboard reports invocations, not billed sub-searches, so compare against
-the *charge*, not the displayed call count. Until then `is_billed_query` remains on the
-singular `query` — one row per call, shares summing to 100% — because that is the only
-attribution that is internally consistent; it is a stated convention, not a verified fact.
+Because the whole corpus runs on **one** service tier (`default`), this reconciliation says
+nothing about whether the call fee varies by tier. Do not generalise it to `flex`/`priority`.
 
-Only `action_type: search` is believed to carry the per-call fee; `open_page` and
-`find_in_page` consume tokens but no call fee. Also unverified.
+### Rates
 
-**`service_tier` is part of the pricing key**, not a detail: flex bills near batch rates and
-priority roughly 2x standard — a ~4x spread. `config.yaml` holds rates per tier.
+`config.yaml` holds rates per tier (`service_tier` is part of the pricing key: flex bills
+near batch rates and priority roughly 2x standard — a ~4x spread).
 
 Filled so far (operator-supplied 2026-08-03, `standard` only):
 
@@ -106,16 +118,18 @@ Filled so far (operator-supplied 2026-08-03, `standard` only):
 | input | $2.50 |
 | cached input | $0.25 (1/10th — matches the published discount) |
 | output | $15.00 |
-| search calls | $10.00 per 1K |
+| search calls | $10.00 per 1K, on **every** action type |
 
 `flex` and `priority` stay null deliberately. Deriving them from published ratios would be
 inventing numbers, so their runs report as UNPRICED and are excluded from the total rather
-than borrowing standard's rates. A run with **no** `service_tier` is costed at standard, on
-the inference that absent means the API default was used — `coa analyze` labels that.
+than borrowing standard's rates. **The real corpus needs neither**: 100% of runs report
+`service_tier: "default"`, which is the OpenAI API's own name for the standard tier, and the
+billing reconciliation above confirms its call fee is the $10/1K standard rate. A run with
+**no** `service_tier` is still costed at standard, on the inference that absent means the API
+default was used — `coa analyze` labels that.
 
-`coa analyze` reports cost as a **range**, because the billing unit is unresolved: the low
-bound bills per visible call, the high bound per `queries` entry. The spread is the open
-question, not rate uncertainty.
+`coa analyze` reports cost as a **single figure**, not a range. The range existed only to
+straddle the unresolved billing unit; the reconciliation collapsed it.
 
 Two cost levers that need **no change to search behaviour at all**:
 
@@ -188,6 +202,16 @@ A fact recorded in only one of the three is one refactor away from being lost.
   over one that asks the operator to confirm a shape up front. A counter in the ingest
   summary settles the question from data in one run; a question costs a round-trip and can
   be answered from a faulty memory. `evidence shapes` in the summary exists for exactly this.
+- **But that applies to shapes nobody has stated — never to a fact the operator has already
+  given.** Once a key name or shape arrives through channel 2, encode it directly: a tuple of
+  candidate spellings for a *known* key is speculative generality, and it buries the confirmed
+  answer among guesses. If a stated fact was not recorded and is now unclear, **ask** — the
+  operator is a cheap, authoritative source, and the round-trip argument above is about
+  questions that data can answer instead, not about facts only they hold.
+- What must survive either way is invariant 1: a shape the parser cannot use gets an anomaly
+  naming what it actually saw. `OUTPUT_NO_QUESTIONS`, `OUTPUT_NO_CITATION_EVIDENCE` and
+  `OUTPUT_NO_VOTES` exist because their silent-counter predecessors let an empty questions
+  table, zero dict citations and zero votes pass unremarked through a full real ingest.
 
 ## Known real-data format facts
 
@@ -200,19 +224,46 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 | Evidence is returned **only when the answer is ≤ 3**; otherwise NULL | confirmed |
 | Free-text questions (registered address, building type) return **`value \| NULL`** — a literal `NULL` is a first-class *answer*, not only an evidence state | confirmed |
 | The answer-format instruction is part of the **user prompt**, attached to the questions | confirmed |
-| The per-run answer map is keyed **`answer`** (singular), not `answers` as PLAN.md §4 said | confirmed — both spellings parsed, `answer key` in the ingest summary reports which was seen |
+| The per-run answer map is keyed **`answer`** (singular), not `answers` as PLAN.md §4 said | confirmed — and `answers` does **not** exist, so only `answer` is read. The `keys not found` line in the ingest summary is the positive confirmation |
+| **`voted_majority` / `voted_final` live INSIDE `answer_dict`**, beside its `run_<n>` keys | confirmed 2026-08-04. PLAN.md §4 put them at the record top level, which is why `votes` came back 0 — the same wrong-nesting bug as `citation_evidence`, in the opposite direction |
 | `logs/jsonl/*.jsonl` is the authoritative call source; `logs/*.log` is redundant except for timestamps | confirmed — action counts matched exactly |
 | A call's `queries` is a **fixed-length set of sub-queries within one call**, NOT cumulative session history | confirmed — length constant, members differ between consecutive calls |
 | The singular `query` is **not always verbatim** in `queries` — 2.9% of real calls | confirmed. Nearly all are requoting, e.g. `"MARIANNA" "Cathedral City, CA 92234"` vs `"Marianna" "Cathedral City" "CA 92234"`. `QUERY_REQUOTED` counts those; `QUERY_NOT_IN_QUERIES` is reserved for genuine disagreement |
-| Whether each `queries` entry bills as its own search | **UNRESOLVED, ~4x cost swing** — see "Cost model"; settle on the billing dashboard before publishing any figure |
+| Whether each `queries` entry bills as its own search | **RESOLVED — it does not.** Billing is per visible call; $6,946.95 / $0.01 = 694,695 = the exact call count. See "The billing unit is RESOLVED" |
+| Whether `open_page` / `find_in_page` carry the per-call fee | **RESOLVED — they do**, at the same $10/1K. They are 101,985 of the 694,695 billed calls (**$1,019.85**). Costing only `search` understates the fee by 17.2% |
 | `web_search_call.action.sources` would link citations to calls, but is opt-in (`include=[...]`) and absent here | confirmed from API docs — per *call*, so it cannot reach an individual `queries` entry. **Low value: see "The decision lever is the question"** |
 | `input_tokens + output_tokens == total_tokens`, so `cache_read` and `reasoning` are **subsets** | confirmed — holds across the corpus |
 | `response_reasoning` has keys `id`/`type`/`summary`/`content`, but reasoning summaries were **not opted into**, so content is empty | confirmed — field not stored, only its token count |
-| `service_tier` appears per run and varies | confirmed — pricing is keyed by tier |
-| Whether a non-`completed` call is still billed | **unconfirmed** — `CALL_STATUS_NOT_COMPLETED` counts them; settle on the billing dashboard |
-| When no evidence is required, whether the line reads `Evidence. NULL`, a bare `Evidence.`, or is **omitted entirely** | **unconfirmed** — all three parsed; see `evidence shapes` in the ingest summary |
+| `service_tier` appears per run, and on the real corpus its value is **`"default"` for 100% of runs** | confirmed — a *fourth* tier string beyond standard/flex/priority. `"default"` is the OpenAI API's own name for the standard tier, so it must map to `standard` rates. It currently does **not**: `Pricing.for_tier` finds no `default` key and returns empty rates, so every run reports UNPRICED and the total comes out $0.00 |
+| Whether a non-`completed` call is still billed | **moot on this corpus** — status is `completed` for all 694,695 calls, so `CALL_STATUS_NOT_COMPLETED` is 0 and there are no instances to settle |
+| When no evidence is required, whether the line reads `Evidence. NULL`, a bare `Evidence.`, or is **omitted entirely** | **RESOLVED — all three occur, and the omitted case is common.** Of 2,369,904 prose answers: `NULL` 1,048,180 (44.2%), real evidence 720,370 (30.4%), **no Evidence line at all 601,353 (25.4%)**, bare label 1. Requiring the Evidence line in the block regex would have silently lost a quarter of the corpus |
 | Whether a scale answer is a bare digit or a digit followed by prose | **unconfirmed** — `answer_text` stored verbatim, scale value derived, never assumed |
-| Whether `answer_dict` holds their parse of the same prose or a normalized form | **unconfirmed** — `agree_with_dict` measures it; `ANSWER_PARSE_MISMATCH` is aggregated per (record, run) so a systematic difference cannot flood |
+| Whether `answer_dict` holds their parse of the same prose or a normalized form | **their parse, and it is bimodal.** 143,148 of 2,369,904 comparable answers differ (6.0%), but they concentrate: only 8,808 of 50,420 runs (17.5%) contain *any* disagreement, and those average 16 of 48 differing. Even spread would mean normalization; this shape means a systematic format difference in a subset of runs. Per-qnum breakdown is P4's job |
+| `answer_dict` shape is `{run_0: {"A1": ..., "A2": ...}, ...}` | confirmed — matches what `_run_answer_map` already expects |
+
+### What the first real doctor run added (2026-08-03)
+
+Everything below came from one `coa doctor` paste and is **not** yet rendered in
+`gen_fixtures.py`. Until it is, the fixtures no longer describe reality — see the capture
+rule; this is the outstanding third leg.
+
+| Fact | Status |
+|---|---|
+| **The `questions` table is EMPTY on real data — `canonical set 0`** | confirmed, and it is the P4 blocker. `extract_questions` matched nothing for all 19,350 records, so the `question` field's shape differs from `record["question"][0][1]` holding a `Q1. ... Q48.` block. Knock-on: `QUESTION_SET_DRIFT` and `ANSWER_BLOCK_COUNT` were **vacuously** silent (the latter is gated on `if canonical and missing`), and `cache_picture`'s shared-prefix measurement had no prompts to fold |
+| `_sync_questions` records **no anomaly** when extraction yields nothing | confirmed bug — it bumps `out_no_questions` and returns. A silent counter-only path, exactly what invariant 1 forbids. The only trace was `canonical set 0`, which the operator had to think to look at. `OUTPUT_NO_ANSWERS` is the model to copy |
+| **`citation_evidence` is a TOP-LEVEL key**, sibling to `questions` / `answer` / `answer_dict` | confirmed. Shape `{"run_0": [{…, "a_key": "A1", …}], "run_1": …}` — a list of dicts, and the entries **do** carry `a_key`, so PLAN.md §6.4's "citation → question is EXACT via `a_key`" stands. What was wrong is only *where* PLAN.md §4 put the field: `_store_dict_citations` read `answer_dict["citation_evidence"]`, got `None`, and returned with **no anomaly and not even a counter** — the worst of the silent paths, and the reason `citations by source` showed only `markdown_prose` and `CITATION_SOURCE_MISMATCH` was 0 |
+| `citation_evidence[run][i]["question"]` holds the question **text** | confirmed. The parser files it as `citations.title`. Worth a `COUNT(DISTINCT title)` — a second, independent source for the canonical question set |
+| `citation_evidence[run][i]["evidence"]` is **parsed nowhere** | confirmed — the parser reads only `citation` and `question`. A free cross-check against our own prose Evidence parse, and possibly the evidence text for the 1,047 runs whose prose yielded nothing |
+| Prose citations carry an exact qnum independently | confirmed — `_store_prose_citations` stamps `block.qnum` from the enclosing answer block, so P4's per-question citation rate never depended on `a_key` at all |
+| **The prompt key is `questions` (plural), holding `[[system, user]]`** | confirmed. PLAN.md §4 and the parser read `question` singular, which is why the `questions` table came back empty for all 19,350 records. The *shape* was right all along; only the key name was wrong |
+| **`voted_majority` / `voted_final` are absent** — `votes 0` | confirmed. The third planned cross-check has no data. Inter-run agreement must be computed from `answers` across `run_id`, not from the votes table. Also counter-only (`out_empty_voted_final`), so it too passed silently |
+| The question set **is** 48, confirmed from the answer side rather than the prompt | confirmed — 2,420,160 answers = **50,420 output-runs x exactly 48**. The scorecard has its denominator even with `questions` empty |
+| The `answer_dict` backstop rescued **1,047 whole runs** | confirmed — 50,256 dict-parsed answers = 1,047 x 48, i.e. runs where prose parsing yielded *nothing* and every answer came from the dict. Invariant 1 working as designed; worth diagnosing why their prose differs |
+| **50.5% of all answers are literally `NULL`** (1,223,141 of 2,420,160) | confirmed, and it is the headline candidate. Too large to be the free-text questions alone, so either far more questions are free-text than assumed, or scale questions also return NULL. P4's per-qnum split decides which |
+| 80 merchants appear in `input/` and `output/` but have **no logs** | confirmed — 19,349 vs 19,269. 0.4%; they have answers but no search calls, so they must be excluded from any per-merchant call or cost denominator |
+| **`pii_terms` is exactly 1.000 per merchant** (19,349 / 19,349) | confirmed and almost certainly wrong. Fixtures yield ~11.7 per merchant. Only one `PII_FIELDS` key is matching the real input schema, so P3 templating would leave nearly all merchant PII unmasked — a privacy problem, not a metrics one (see `inputs.py` docstring) |
+| Every search call has a singular `query` | confirmed — 592,710 billed `query_instances` rows = the search-call count exactly, and `CALL_FIELD_MISSING` is 0. Sub-queries are 1,805,026 = 3.05 per call, consistent with a constant `len(queries) == 4` minus the verbatim dedup |
+| The pasted DB **predates the `QUERY_REQUOTED` split** (commit `0402168`) | inferred — `QUERY_NOT_IN_QUERIES` still reads 17,231, the pre-split figure, and `QUERY_REQUOTED` is absent. Anomalies are written at ingest and `coa doctor` only reads them. `coa reparse` refreshes the parse but writes its rows under `stage='reparse'` while leaving the old `stage='weblogs'` rows in place, so the codes would then double-count in doctor's tally |
 
 ### The decision lever is the question, not the query
 
