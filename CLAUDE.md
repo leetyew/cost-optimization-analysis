@@ -199,6 +199,7 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 | The per-run answer map is keyed **`answer`** (singular), not `answers` as PLAN.md §4 said | confirmed — both spellings parsed, `answer key` in the ingest summary reports which was seen |
 | `logs/jsonl/*.jsonl` is the authoritative call source; `logs/*.log` is redundant except for timestamps | confirmed — action counts matched exactly |
 | A call's `queries` is a **fixed-length set of sub-queries within one call**, NOT cumulative session history | confirmed — length constant, members differ between consecutive calls |
+| The singular `query` is **not always verbatim** in `queries` — 2.9% of real calls | confirmed. Nearly all are requoting, e.g. `"MARIANNA" "Cathedral City, CA 92234"` vs `"Marianna" "Cathedral City" "CA 92234"`. `QUERY_REQUOTED` counts those; `QUERY_NOT_IN_QUERIES` is reserved for genuine disagreement |
 | Whether each `queries` entry bills as its own search | **UNRESOLVED, ~4x cost swing** — see "Cost model"; settle on the billing dashboard before publishing any figure |
 | `web_search_call.action.sources` would link citations to calls, but is opt-in (`include=[...]`) and absent here | confirmed from API docs — per *call*, so it cannot reach an individual `queries` entry. **Low value: see "The decision lever is the question"** |
 | `input_tokens + output_tokens == total_tokens`, so `cache_read` and `reasoning` are **subsets** | confirmed — holds across the corpus |

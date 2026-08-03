@@ -314,10 +314,18 @@ def build_weblogs(merchants: list[dict], rng: random.Random) -> tuple[list[dict]
     tally["action_summarize_page"] += 1
     tally["planted_unknown_action"] += 1
 
-    # QUERY_NOT_IN_QUERIES: the operator believes this never happens.
+    # QUERY_NOT_IN_QUERIES: genuinely different text, not a requoting.
     call = next(iter(records[2].values()))["run_0"]["web_search_calls"][0]
     call["queries"] = ["an unrelated query", "another one"]
     tally["planted_query_not_in_queries"] += 1
+
+    # QUERY_REQUOTED: same search, different case and quote grouping. Observed on
+    # real data at ~2.9% of calls — the model requoting its own query. Kept
+    # distinct from a genuine mismatch, or the real signal drowns in reformatting.
+    requoted = next(iter(records[8].values()))["run_0"]["web_search_calls"][0]
+    requoted["query"] = '"MARIANNA" "Cathedral City, CA 92234"'
+    requoted["queries"] = ['"Marianna" "Cathedral City" "CA 92234"', "unrelated"]
+    tally["planted_query_requoted"] += 1
 
     # CALL_STATUS_NOT_COMPLETED: does an incomplete call still bill?
     next(iter(records[3].values()))["run_0"]["web_search_calls"][0]["status"] = "failed"
@@ -597,6 +605,7 @@ def write_fixtures() -> dict:
         "reasoning": wl_tally["reasoning"],
         "planted_unknown_action": wl_tally["planted_unknown_action"],
         "planted_query_not_in_queries": wl_tally["planted_query_not_in_queries"],
+        "planted_query_requoted": wl_tally["planted_query_requoted"],
         "planted_status_not_completed": wl_tally["planted_status_not_completed"],
         "planted_field_missing": wl_tally["planted_field_missing"],
         "planted_token_sum_mismatch": wl_tally["planted_token_sum_mismatch"],
@@ -694,6 +703,7 @@ def write_fixtures() -> dict:
             "ENCODING",
             "UNKNOWN_ACTION_TYPE",
             "QUERY_NOT_IN_QUERIES",
+            "QUERY_REQUOTED",
             "CALL_STATUS_NOT_COMPLETED",
             "CALL_FIELD_MISSING",
             "TOKEN_SUM_MISMATCH",

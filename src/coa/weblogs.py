@@ -26,6 +26,7 @@ analysis and never cost.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections import Counter
 from collections.abc import Iterable
@@ -111,16 +112,36 @@ def parse_call(call: object) -> ParsedCall:
         notes.append(("QUERIES_NOT_A_LIST", f"`queries` is {type(raw_queries).__name__}"))
         conf = "heuristic"
 
-    # The operator believes the singular query always appears within the plural
-    # list. Cheap to verify now that both are structured, and worth verifying:
-    # it is the only cross-check that the two fields describe the same call.
-    if query_raw is not None and queries is not None and query_raw not in queries:
-        notes.append(
-            (
-                "QUERY_NOT_IN_QUERIES",
-                f"query {query_raw!r} is absent from its {len(queries)}-item `queries` list",
+    # The operator believed the singular query always appears verbatim in the
+    # plural list. On real data it does not, 2.9% of the time — but nearly all of
+    # those are the model requoting its own query rather than a different search:
+    #
+    #   query      "MARIANNA" "Cathedral City, CA 92234"
+    #   queries[n] "Marianna" "Cathedral City" "CA 92234"
+    #
+    # Same terms, different case and quote grouping. Flagging that as a mismatch
+    # buries the cases where the two fields genuinely disagree, so the check is
+    # tiered: exact, then requoted, then actually absent. Only the last is an
+    # anomaly; the middle is counted so the reformulation rate stays visible.
+    if query_raw is not None and queries is not None:
+        if query_raw in queries:
+            pass
+        elif _norm_query(query_raw) in {_norm_query(q) for q in queries}:
+            notes.append(
+                (
+                    "QUERY_REQUOTED",
+                    f"query {query_raw!r} appears in `queries` only after normalizing case "
+                    f"and quoting",
+                )
             )
-        )
+        else:
+            notes.append(
+                (
+                    "QUERY_NOT_IN_QUERIES",
+                    f"query {query_raw!r} is absent from its {len(queries)}-item `queries` "
+                    f"list even after normalizing; entries: {queries[:4]}",
+                )
+            )
 
     if action_type == "search" and query_raw is None:
         notes.append(
@@ -149,6 +170,23 @@ def parse_call(call: object) -> ParsedCall:
         parse_conf=conf,
         notes=notes,
     )
+
+
+# Quote characters and separators the model shuffles while meaning the same
+# search. Everything outside this is left alone: stripping more would start
+# collapsing genuinely different queries into each other.
+_QUERY_NOISE = re.compile(r"[\"\u201c\u201d\u2018\u2019\',;:()\[\]]+")
+
+
+def _norm_query(text: str) -> str:
+    """Comparison form for query text: casefold, drop quoting, collapse spaces.
+
+    Used only to decide whether the singular `query` and a `queries` entry are
+    the same search written differently. Never stored — `query_text` keeps the
+    verbatim string, because P3 templates the real text and a normalized form
+    would mask the PII it must replace.
+    """
+    return " ".join(_QUERY_NOISE.sub(" ", text).casefold().split())
 
 
 def _run_id(run_key: str) -> int | None:

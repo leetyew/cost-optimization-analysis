@@ -13,13 +13,14 @@
     "INPUT_OUTPUT_FIELD_CONFLICT",
     "MISSING_USAGE_METADATA",
     "QUERY_NOT_IN_QUERIES",
+    "QUERY_REQUOTED",
     "QUESTION_SET_DRIFT",
     "RUN_KEY_UNPARSED",
     "TOKEN_SUM_MISMATCH",
     "UNKNOWN_ACTION_TYPE",
     "VOTE_VALUE_LIST"
   ],
-  "fingerprint": "7dba5444ded591b7",
+  "fingerprint": "c35e119a72073e92",
   "inputs": {
     "dup_input_se10": 1,
     "n_records": 31,
@@ -66,6 +67,7 @@
     "planted_field_missing": 1,
     "planted_no_usage_metadata": 1,
     "planted_query_not_in_queries": 1,
+    "planted_query_requoted": 1,
     "planted_run_key_unparsed": 1,
     "planted_status_not_completed": 1,
     "planted_token_sum_mismatch": 1,

@@ -344,3 +344,48 @@ def test_every_planted_weblog_hazard_fired(corpus) -> None:
         "BAD_JSON_LINE",
         "ENCODING",
     } <= codes
+
+
+def test_requoted_query_is_not_a_mismatch() -> None:
+    """Observed on real data at ~2.9% of calls: the model requotes its own query.
+
+    Same terms, different case and quote grouping. Reporting it as a mismatch
+    buries the calls where the two fields genuinely disagree.
+    """
+    pc = parse_call(
+        dict(
+            SEARCH,
+            query='"MARIANNA" "Cathedral City, CA 92234"',
+            queries=['"Marianna" "Cathedral City" "CA 92234"', "unrelated"],
+        )
+    )
+    codes = [c for c, _ in pc.notes]
+    assert codes == ["QUERY_REQUOTED"]
+
+
+def test_genuine_mismatch_still_fires() -> None:
+    pc = parse_call(dict(SEARCH, query="entirely unrelated text", queries=["a", "b"]))
+    assert [c for c, _ in pc.notes] == ["QUERY_NOT_IN_QUERIES"]
+
+
+def test_exact_membership_is_silent() -> None:
+    pc = parse_call(dict(SEARCH, query="a", queries=["a", "b"]))
+    assert not pc.notes
+
+
+def test_normalizing_does_not_collapse_different_searches() -> None:
+    """The normalization must not merge queries that are genuinely distinct."""
+    pc = parse_call(dict(SEARCH, query="acme widgets scam", queries=["acme widgets reviews"]))
+    assert [c for c, _ in pc.notes] == ["QUERY_NOT_IN_QUERIES"]
+
+
+def test_verbatim_query_text_is_stored_not_the_normalized_form(
+    conn: sqlite3.Connection,
+) -> None:
+    """P3 templates the real text, so normalization must never reach storage."""
+    raw = '"MARIANNA" "Cathedral City, CA 92234"'
+    run(conn, [record(web_search_calls=[dict(SEARCH, query=raw, queries=[raw])])])
+    stored = conn.execute(
+        "SELECT query_text FROM query_instances WHERE is_billed_query = 1"
+    ).fetchone()
+    assert stored["query_text"] == raw
