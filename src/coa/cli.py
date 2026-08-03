@@ -10,6 +10,7 @@ Subcommands, in the order they are meant to be run:
     coa reparse    re-extract fields from stored raw lines, no source files read
     coa analyze    templating, archetypes, agreement, cost
     coa report     markdown + CSV bundle under reports/<timestamp>/
+    coa doctor     one-screen health check, ready to paste back
     coa anomalies  summary | show CODE      <- the operator feedback channel
 """
 
@@ -27,6 +28,7 @@ from pathlib import Path
 from . import anomalies as anom
 from .config import Config
 from .db import already_ingested, connect, forget_file, mark_ingested
+from .health import health_report
 from .inputs import ingest_input
 from .metrics import (
     cache_picture,
@@ -349,6 +351,16 @@ def cmd_reparse(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
 
+def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
+    """One paste-ready screen of what actually landed. See health.py."""
+    conn = connect(cfg.db)
+    try:
+        print(health_report(conn))
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
     """Analysis over ingested tables. Templating and archetypes land in P3."""
     conn = connect(cfg.db)
@@ -399,6 +411,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     rep = sub.add_parser("reparse", help="re-extract fields from stored raw lines")
     rep.set_defaults(func=cmd_reparse)
+
+    doc = sub.add_parser("doctor", help="one-screen health check, ready to paste back")
+    doc.set_defaults(func=cmd_doctor)
 
     ana = sub.add_parser("analyze", help="templating, archetypes, metrics")
     ana.set_defaults(func=cmd_analyze)

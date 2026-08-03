@@ -179,6 +179,10 @@ A fact recorded in only one of the three is one refactor away from being lost.
   Adding a newly-discovered case must be a ~3-line diff plus a golden count.
 - The anomaly CLI output is a UX surface, not a formatting detail. If it emits 5000 lines,
   the loop breaks. Keep it deduped, capped, and paste-ready.
+- **`coa doctor` is the diagnostic surface.** The operator hand-types across the air gap, so
+  anything worth asking about an ingest belongs in that one command rather than in ad-hoc SQL
+  sent over chat. It reports row counts as *positive confirmation*: an absent anomaly is
+  ambiguous (clean data, or a detector that never ran), and only counts disambiguate.
 - Assume reality contradicts at least some format assumption in `PLAN.md`. Budget for it.
 - **Prefer a parser that tolerates every candidate shape and reports which one it saw**
   over one that asks the operator to confirm a shape up front. A counter in the ingest
