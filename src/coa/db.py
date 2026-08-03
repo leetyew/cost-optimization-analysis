@@ -164,6 +164,19 @@ CREATE TABLE IF NOT EXISTS questions (
     text TEXT NOT NULL
 );
 
+-- One row per (output_record, run, qnum). THREE independent parses of the same
+-- underlying prose reach this row, and keeping them side by side rather than
+-- collapsing them at ingest is deliberate: whose parse is authoritative is a
+-- question the corpus answers, and answering it must not cost a re-ingest.
+--
+--   * `answer_text` / `evidence_text` -- ours, from the run's prose blob.
+--   * `ce_answer` / `ce_evidence`     -- theirs, from citation_evidence[run][i].
+--   * answer_dict                     -- theirs, second copy; not stored as text
+--                                        (it duplicates answer_text on the rows
+--                                        it rescued), only compared.
+--
+-- `parsed_from` names which source populated `answer_text`, so a row sourced
+-- from a backstop is never mistaken for one our regex actually matched.
 CREATE TABLE IF NOT EXISTS answers (
     id              INTEGER PRIMARY KEY,
     se10            TEXT NOT NULL,
@@ -172,9 +185,12 @@ CREATE TABLE IF NOT EXISTS answers (
     qnum            INTEGER,
     answer_text     TEXT,
     evidence_text   TEXT,
+    ce_answer       TEXT,               -- citation_evidence[run][i]["answer"]
+    ce_evidence     TEXT,               -- citation_evidence[run][i]["evidence"]
     is_null         INTEGER NOT NULL DEFAULT 0,
-    parsed_from     TEXT,               -- answers_text | answer_dict
-    agree_with_dict INTEGER             -- NULL when there is nothing to compare against
+    parsed_from     TEXT,               -- answers_text | answer_dict | citation_evidence
+    agree_with_dict INTEGER,            -- NULL when there is nothing to compare against
+    agree_with_ce   INTEGER             -- same, against citation_evidence's answer
 );
 CREATE INDEX IF NOT EXISTS ix_answers_q ON answers(qnum);
 CREATE INDEX IF NOT EXISTS ix_answers_se10 ON answers(se10);
@@ -223,6 +239,24 @@ CREATE TABLE IF NOT EXISTS labels (
     ts     TEXT
 );
 
+-- "No evidence" is THREE renderings on the real corpus, not one: the line can be
+-- absent entirely (25.4%), carry a literal NULL (44.2%), or be a bare label. A
+-- test of `evidence_text IS NULL` alone catches only the first and reads the
+-- other two as real evidence. Defining the classification once, here, is what
+-- stops each consumer re-deriving it and getting a different answer.
+CREATE VIEW IF NOT EXISTS answer_facts AS
+SELECT
+    a.*,
+    CASE WHEN evidence_text IS NULL              THEN 'absent'
+         WHEN TRIM(evidence_text) = ''           THEN 'empty'
+         WHEN UPPER(TRIM(evidence_text)) = 'NULL' THEN 'null'
+         ELSE 'present' END                            AS evidence_shape,
+    CASE WHEN ce_evidence IS NULL                THEN 'absent'
+         WHEN TRIM(ce_evidence) = ''             THEN 'empty'
+         WHEN UPPER(TRIM(ce_evidence)) = 'NULL'  THEN 'null'
+         ELSE 'present' END                            AS ce_evidence_shape
+FROM answers a;
+
 -- Archetypes are a rollup, not stored state, until the hand-grouping outgrows it.
 CREATE VIEW IF NOT EXISTS archetypes AS
 SELECT
@@ -251,7 +285,35 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _check_schema_current(conn)
     return conn
+
+
+def _check_schema_current(conn: sqlite3.Connection) -> None:
+    """Refuse a DB whose `answers` predates the citation_evidence columns.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a DB built
+    before those columns existed opens cleanly and then fails deep inside an
+    INSERT with `table answers has no column named ce_answer`. Across the air gap
+    that costs a round-trip to decode.
+
+    Deliberately NOT an `ALTER TABLE ... ADD COLUMN` migration. Adding the columns
+    would leave them NULL for every existing row, and a NULL `ce_evidence` is
+    indistinguishable from "citation_evidence carried no evidence here" — the
+    scorecard would silently report a repaired corpus as an unrepaired one. A
+    parse change needs a re-parse; the only honest fix is re-ingesting `output/`.
+    """
+    # Indexed, not keyed: this guard must work on any connection handed to it,
+    # including one whose row_factory was never set.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(answers)")}
+    missing = {"ce_answer", "ce_evidence", "agree_with_ce"} - cols
+    if cols and missing:
+        raise RuntimeError(
+            f"this DB's `answers` table predates {', '.join(sorted(missing))}. "
+            "Those columns are populated at parse time, so adding them empty would "
+            "misreport the corpus. Re-ingest output/ into a fresh DB: "
+            "`coa --db <new.sqlite> ingest <data_root>`."
+        )
 
 
 def already_ingested(conn: sqlite3.Connection, src_file: str) -> bool:

@@ -39,6 +39,88 @@ def _breakdown(conn: sqlite3.Connection, sql: str, label: str, empty: str = "non
     return _line(label, ", ".join(parts) if parts else empty)
 
 
+def _answer_source_lines(conn: sqlite3.Connection, n_a: int) -> list[str]:
+    """Which of the three parses reached each answer, and where they disagree.
+
+    Four questions live here, all of them previously unanswerable without an
+    ad-hoc SQL round-trip, and all of them load-bearing for the scorecard:
+
+    1. **Does `citation_evidence` cover every question?** `answer_dict` is proven
+       complete — it rescued 1,047 whole runs at 48 answers each. Coverage for
+       `citation_evidence` is inferred from "one entry per answer" and has never
+       been counted. If it is thin, preferring it swaps a measured guarantee for
+       an assumed one.
+    2. **How much evidence does it repair?** Answers where our prose parse found
+       no Evidence line but theirs did. Every one of those was being scored as a
+       default-3 on our failure rather than on their pipeline's finding.
+    3. **Do their two parses agree with each other?** On rows sourced from
+       `answer_dict`, `answer_text` IS the dict's answer — so `agree_with_ce`
+       there is a direct dict-vs-citation_evidence comparison. If they never
+       disagree they are one source wearing two names, and agreement between them
+       proves nothing.
+    4. **Do ours and theirs agree?** The rate that decides whether
+       `--answer-source` changes any conclusion or is merely available.
+    """
+    have_ce = _scalar(conn, "SELECT COUNT(*) FROM answers WHERE ce_answer IS NOT NULL")
+    out = [_line("ce_answer present", f"{have_ce:,} of {n_a:,} ({have_ce / n_a:.1%})")]
+
+    # Per (record, run): does citation_evidence carry all 48, or only some?
+    cov = conn.execute(
+        "SELECT COUNT(*) AS runs, SUM(c = 48) AS full, SUM(c = 0) AS none, "
+        "COALESCE(AVG(c), 0) AS avg FROM ("
+        "  SELECT output_id, run_id, COUNT(ce_answer) AS c FROM answers "
+        "  GROUP BY output_id, run_id)"
+    ).fetchone()
+    out.append(
+        _line(
+            "ce coverage / run",
+            f"{cov['full'] or 0:,} of {cov['runs']:,} runs have all 48 "
+            f"({cov['none'] or 0:,} have none, mean {cov['avg']:.1f})",
+        )
+    )
+
+    repaired = _scalar(
+        conn,
+        "SELECT COUNT(*) FROM answer_facts "
+        "WHERE evidence_shape != 'present' AND ce_evidence_shape = 'present'",
+    )
+    out.append(
+        _line("evidence repaired", f"{repaired:,} answers where only THEIR parse found evidence")
+    )
+
+    # Their dict vs their citation_evidence, isolated on the rows where
+    # answer_text is the dict's own answer.
+    dictrows = conn.execute(
+        "SELECT SUM(agree_with_ce = 1) a, SUM(agree_with_ce = 0) d, COUNT(*) n "
+        "FROM answers WHERE parsed_from = 'answer_dict'"
+    ).fetchone()
+    if dictrows["n"]:
+        out.append(
+            _line(
+                "dict vs ce",
+                f"{dictrows['a'] or 0:,} agree, {dictrows['d'] or 0:,} differ "
+                f"(of {dictrows['n']:,} dict-sourced answers)",
+            )
+        )
+    else:
+        out.append(_line("dict vs ce", "no answer_dict-sourced rows to compare on"))
+
+    ours = conn.execute(
+        "SELECT SUM(agree_with_ce = 1) a, SUM(agree_with_ce = 0) d, "
+        "SUM(agree_with_ce IS NULL) n FROM answers"
+    ).fetchone()
+    comparable = (ours["a"] or 0) + (ours["d"] or 0)
+    rate = f"{(ours['d'] or 0) / comparable:.1%} differ" if comparable else "n/a"
+    out.append(
+        _line(
+            "ours vs ce",
+            f"{ours['a'] or 0:,} agree, {ours['d'] or 0:,} differ, "
+            f"{ours['n'] or 0:,} not comparable ({rate})",
+        )
+    )
+    return out
+
+
 def health_report(conn: sqlite3.Connection) -> str:
     """Everything worth knowing about an ingest, in one screen.
 
@@ -116,16 +198,22 @@ def health_report(conn: sqlite3.Connection) -> str:
                 "parsed from",
             )
         )
-        # The three Evidence renderings, derived rather than remembered: which one
-        # the corpus uses was an open question the data settles.
+        # The three Evidence renderings. Classified by the `answer_facts` view so
+        # this and the scorecard cannot drift apart — a second definition of
+        # "no evidence" is precisely how `evidence_text IS NULL` came to be
+        # treated as the whole story when it covers only 4% of the cases.
         out.append(
             _breakdown(
                 conn,
-                "SELECT CASE WHEN evidence_text IS NULL THEN 'absent' "
-                "WHEN TRIM(evidence_text) = '' THEN 'empty' "
-                "WHEN UPPER(TRIM(evidence_text)) = 'NULL' THEN 'null' ELSE 'present' END, "
-                "COUNT(*) FROM answers GROUP BY 1 ORDER BY 2 DESC",
+                "SELECT evidence_shape, COUNT(*) FROM answer_facts GROUP BY 1 ORDER BY 2 DESC",
                 "evidence shape",
+            )
+        )
+        out.append(
+            _breakdown(
+                conn,
+                "SELECT ce_evidence_shape, COUNT(*) FROM answer_facts GROUP BY 1 ORDER BY 2 DESC",
+                "ce evidence shape",
             )
         )
         # Decides whether agree_with_dict is a usable signal or just their
@@ -143,6 +231,9 @@ def health_report(conn: sqlite3.Connection) -> str:
                 f"{agree['n'] or 0} not comparable ({rate})",
             )
         )
+
+        out += ["", "ANSWER SOURCES"]
+        out += _answer_source_lines(conn, n_a)
 
     # Settles whether PROSE_CITATION_RE is too strict without moving any evidence
     # text across the air gap. The regex requires the markdown link to be wrapped

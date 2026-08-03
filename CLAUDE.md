@@ -228,7 +228,7 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 | **`voted_majority` / `voted_final` live INSIDE `answer_dict`**, beside its `run_<n>` keys | confirmed 2026-08-04. PLAN.md §4 put them at the record top level, which is why `votes` came back 0 — the same wrong-nesting bug as `citation_evidence`, in the opposite direction |
 | `logs/jsonl/*.jsonl` is the authoritative call source; `logs/*.log` is redundant except for timestamps | confirmed — action counts matched exactly |
 | A call's `queries` is a **fixed-length set of sub-queries within one call**, NOT cumulative session history | confirmed — length constant, members differ between consecutive calls |
-| The singular `query` is **not always verbatim** in `queries` — 2.9% of real calls | confirmed. Nearly all are requoting, e.g. `"MARIANNA" "Cathedral City, CA 92234"` vs `"Marianna" "Cathedral City" "CA 92234"`. `QUERY_REQUOTED` counts those; `QUERY_NOT_IN_QUERIES` is reserved for genuine disagreement |
+| The singular `query` is **not always verbatim** in `queries` — 2.9% of real calls | confirmed, but the *cause* was wrong. "Nearly all are requoting" is **refuted**: `QUERY_REQUOTED` is 173 of 17,681 (1.0%), so ~99% are genuine disagreement, not the quoting variant this table used to claim. Do NOT ask the operator to paste `coa anomalies show QUERY_NOT_IN_QUERIES` — its detail embeds raw query text, i.e. merchant names and addresses |
 | Whether each `queries` entry bills as its own search | **RESOLVED — it does not.** Billing is per visible call; $6,946.95 / $0.01 = 694,695 = the exact call count. See "The billing unit is RESOLVED" |
 | Whether `open_page` / `find_in_page` carry the per-call fee | **RESOLVED — they do**, at the same $10/1K. They are 101,985 of the 694,695 billed calls (**$1,019.85**). Costing only `search` understates the fee by 17.2% |
 | `web_search_call.action.sources` would link citations to calls, but is opt-in (`include=[...]`) and absent here | confirmed from API docs — per *call*, so it cannot reach an individual `queries` entry. **Low value: see "The decision lever is the question"** |
@@ -243,9 +243,10 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 
 ### What the first real doctor run added (2026-08-03)
 
-Everything below came from one `coa doctor` paste and is **not** yet rendered in
-`gen_fixtures.py`. Until it is, the fixtures no longer describe reality — see the capture
-rule; this is the outstanding third leg.
+Everything below came from one `coa doctor` paste. Most of it is now rendered in
+`gen_fixtures.py` (2026-08-04): the prose-unparseable run that the `answer_dict` backstop
+rescues, `citation_evidence` as one entry per *answer* rather than per *citation*, and
+default-3 answers that carry no evidence. What remains unrendered is called out per row.
 
 | Fact | Status |
 |---|---|
@@ -253,7 +254,8 @@ rule; this is the outstanding third leg.
 | `_sync_questions` records **no anomaly** when extraction yields nothing | confirmed bug — it bumps `out_no_questions` and returns. A silent counter-only path, exactly what invariant 1 forbids. The only trace was `canonical set 0`, which the operator had to think to look at. `OUTPUT_NO_ANSWERS` is the model to copy |
 | **`citation_evidence` is a TOP-LEVEL key**, sibling to `questions` / `answer` / `answer_dict` | confirmed. Shape `{"run_0": [{…, "a_key": "A1", …}], "run_1": …}` — a list of dicts, and the entries **do** carry `a_key`, so PLAN.md §6.4's "citation → question is EXACT via `a_key`" stands. What was wrong is only *where* PLAN.md §4 put the field: `_store_dict_citations` read `answer_dict["citation_evidence"]`, got `None`, and returned with **no anomaly and not even a counter** — the worst of the silent paths, and the reason `citations by source` showed only `markdown_prose` and `CITATION_SOURCE_MISMATCH` was 0 |
 | `citation_evidence[run][i]["question"]` holds the question **text** | confirmed. The parser files it as `citations.title`. Worth a `COUNT(DISTINCT title)` — a second, independent source for the canonical question set |
-| `citation_evidence[run][i]["evidence"]` is **parsed nowhere** | confirmed — the parser reads only `citation` and `question`. A free cross-check against our own prose Evidence parse, and possibly the evidence text for the 1,047 runs whose prose yielded nothing |
+| **`citation_evidence[run][i]` is a complete per-answer record**, not a citation: keys `question`, `a_key`, `answer`, `citation`, `evidence`, `full_answer_block` | confirmed 2026-08-04. It is therefore a *third answer source* and the only non-prose *evidence* source. `answer` and `evidence` are now parsed into `answers.ce_answer` / `answers.ce_evidence`; `full_answer_block` is deliberately left unparsed (~2.4M raw blocks would dominate the DB, and the two fields it would repair are already extracted) |
+| Whose parse is authoritative — ours, `answer_dict`, or `citation_evidence` | **open, and deliberately not decided at ingest.** All three land on the same `answers` row, so `coa scorecard --answer-source {prose,ce}` switches at query time; changing our mind costs a SQL clause, not a re-ingest of 19k merchants. Operator's prior: theirs is likely better, since their pipeline read 1,047 whole runs ours could not. `coa doctor`'s ANSWER SOURCES block measures it |
 | Prose citations carry an exact qnum independently | confirmed — `_store_prose_citations` stamps `block.qnum` from the enclosing answer block, so P4's per-question citation rate never depended on `a_key` at all |
 | **The prompt key is `questions` (plural), holding `[[system, user]]`** | confirmed. PLAN.md §4 and the parser read `question` singular, which is why the `questions` table came back empty for all 19,350 records. The *shape* was right all along; only the key name was wrong |
 | **`voted_majority` / `voted_final` are absent** — `votes 0` | confirmed. The third planned cross-check has no data. Inter-run agreement must be computed from `answers` across `run_id`, not from the votes table. Also counter-only (`out_empty_voted_final`), so it too passed silently |
@@ -295,7 +297,14 @@ Two consequences that are easy to get backwards:
 - **The drop-candidate signal is "the answer carried no information"**, which unifies both
   regimes: `answer == NULL` for text questions, `answer == 3 with NULL evidence` for scale
   ones. Both are exactly measurable, so the finding survives the "nothing unverifiable"
-  invariant. P2 stores the raw material; P4 computes the rate.
+  invariant. P2 stores the raw material; `coa scorecard` computes the rate.
+- **A 3 that carried evidence is NOT a drop candidate.** Only a 3 that stood because the
+  search found nothing counts — the prompt's stated default. Conflating the two inflates the
+  headline with answers the pipeline actually determined.
+- **"No evidence" means from EITHER parse.** Our regex missing an Evidence line while
+  `citation_evidence` carries one is our failure, not the pipeline's finding. Scoring those
+  as default-3 would have charged 1,047 runs' worth of our own parse bugs to the other team's
+  question set. `answer_facts` (a view in `db.py`) classifies both, in one place.
 
 ## Stack
 

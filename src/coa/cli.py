@@ -9,6 +9,7 @@ Subcommands, in the order they are meant to be run:
     coa ingest     logs/jsonl/ + input/ + output/  ->  SQLite  (resumable)
     coa reparse    re-extract fields from stored raw lines, no source files read
     coa analyze    templating, archetypes, agreement, cost
+    coa scorecard  per-question NULL / default-3 / citation / agreement rates
     coa report     markdown + CSV bundle under reports/<timestamp>/
     coa doctor     one-screen health check, ready to paste back
     coa anomalies  summary | show CODE      <- the operator feedback channel
@@ -39,6 +40,7 @@ from .metrics import (
     tier_usage,
 )
 from .outputs import ingest_output
+from .scorecard import ANSWER_SOURCES, question_scorecard, render_scorecard
 from .weblogs import ingest_weblog, reparse
 
 # (kind, subdir, suffix, parser). Order matters: input/ is ingested before output/
@@ -378,6 +380,16 @@ def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
 
+def cmd_scorecard(args: argparse.Namespace, cfg: Config) -> int:
+    """Per-question rates — the primary deliverable. See scorecard.py."""
+    conn = connect(cfg.db)
+    try:
+        print(render_scorecard(question_scorecard(conn, args.answer_source)))
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
     print("report: not implemented until P5")
     return 0
@@ -420,6 +432,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     ana = sub.add_parser("analyze", help="templating, archetypes, metrics")
     ana.set_defaults(func=cmd_analyze)
+
+    sc = sub.add_parser("scorecard", help="per-question rates (the primary deliverable)")
+    sc.add_argument(
+        "--answer-source",
+        choices=sorted(ANSWER_SOURCES),
+        default="prose",
+        help="which stored parse to score: ours (prose) or theirs (ce). Default prose.",
+    )
+    sc.set_defaults(func=cmd_scorecard)
 
     rpt = sub.add_parser("report", help="build the markdown + CSV bundle")
     rpt.set_defaults(func=cmd_report)

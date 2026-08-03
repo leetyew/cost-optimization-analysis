@@ -206,7 +206,14 @@ def test_unparseable_run_key_is_flagged_not_silently_nulled(
     conn: sqlite3.Connection,
 ) -> None:
     """A NULL run_id disables every per-run metric; that must never be quiet."""
-    rec = record(answer={"batch7": "Q1. t\nA1. 2\nEvidence. x\n\nQ2. t\nA2. NULL"})
+    # citation_evidence carries the same odd key, so the run appears exactly once.
+    # Runs are iterated as the UNION of the answer map and citation_evidence, and
+    # leaving `run_0` here would add a second, well-formed run whose non-NULL
+    # run_id masks the one under test.
+    rec = record(
+        answer={"batch7": "Q1. t\nA1. 2\nEvidence. x\n\nQ2. t\nA2. NULL"},
+        citation_evidence={"batch7": []},
+    )
     _, recorder = run(conn, [rec])
     assert recorder.counts["RUN_KEY_UNPARSED"] == 1
     assert {a["run_id"] for a in rows(conn, "answers")} == {None}
@@ -453,7 +460,10 @@ def test_golden_answer_and_vote_counts(corpus, golden: dict) -> None:
     conn = corpus.conn
     expected = golden["outputs"]
     n_answers = conn.execute("SELECT COUNT(*) AS n FROM answers").fetchone()["n"]
-    assert n_answers == expected["answer_blocks"]
+    # Blocks our regex parsed, PLUS the run it could not read at all, whose 48
+    # answers arrive from answer_dict. Asserting only the block count would let
+    # the backstop silently stop working.
+    assert n_answers == expected["answer_blocks"] + expected["answers_from_dict"]
     n_null = conn.execute("SELECT COUNT(*) AS n FROM answers WHERE is_null").fetchone()["n"]
     assert n_null == expected["null_answers"]
     n_votes = conn.execute("SELECT COUNT(*) AS n FROM votes").fetchone()["n"]
@@ -471,7 +481,9 @@ def test_golden_citation_counts(corpus, golden: dict) -> None:
     expected = golden["outputs"]
     assert corpus.totals["out_prose_citations"] == expected["prose_citations"]
     assert corpus.totals["out_empty_placeholders"] == expected["empty_placeholders"]
-    assert corpus.totals["out_citations_outside_blocks"] == 0
+    # Non-zero by design: the prose-unparseable run's markdown links are enclosed
+    # by no parsed block, and the counter is what keeps them from vanishing.
+    assert corpus.totals["out_citations_outside_blocks"] == expected["citations_outside_blocks"]
 
 
 def test_citation_mismatch_is_confined_to_the_planted_record(corpus, golden: dict) -> None:
@@ -537,10 +549,15 @@ def test_plural_answers_key_is_not_read(conn: sqlite3.Connection) -> None:
     """`answer` is the confirmed key; PLAN.md §4's `answers` must not resurface.
 
     Reading the wrong spelling is what emptied the answer map on the first real
-    ingest, so the failure has to be loud rather than a silently empty table.
+    ingest, so the failure has to be loud rather than a silently empty table —
+    and it stays loud even though citation_evidence now recovers the answers.
     """
     rec = record()
     rec["answers"] = rec.pop("answer")
+    rec["citation_evidence"] = {"run_0": [{"a_key": "A1", "answer": "2", "citation": None}]}
     stats, recorder = run(conn, [rec])
-    assert stats["out_runs"] == 0
     assert recorder.counts["OUTPUT_NO_ANSWERS"] == 1
+    # No prose reached the parser, so nothing may be attributed to our own parse.
+    assert stats["out_answer_blocks"] == 0
+    sources = {a["parsed_from"] for a in rows(conn, "answers")}
+    assert "answers_text" not in sources

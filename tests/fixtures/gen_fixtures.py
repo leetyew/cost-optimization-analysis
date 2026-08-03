@@ -421,7 +421,7 @@ def build_run_text(
     rng: random.Random,
     *,
     n_blocks: int = N_QUESTIONS,
-) -> tuple[str, list[dict], dict[int, str], Counter]:
+) -> tuple[str, list[dict], dict[int, str], dict[int, str | None], Counter]:
     """Render one run's answer text, prose citations, answers by qnum, and a tally.
 
     Returns what a correct parser should recover, so the golden counts are derived
@@ -434,6 +434,10 @@ def build_run_text(
     """
     blocks, cites = [], []
     answers_by_q: dict[int, str] = {}
+    # What their pipeline parsed as evidence for each question. Returned alongside
+    # the prose so citation_evidence can carry ONE ENTRY PER ANSWER the way the
+    # real records do, rather than one per cited question.
+    evidence_by_q: dict[int, str | None] = {}
     tally: Counter[str] = Counter()
 
     for qnum in range(1, n_blocks + 1):
@@ -442,9 +446,18 @@ def build_run_text(
             value = rng.choices([1, 2, 3, 4, 5], weights=[1, 2, 4, 2, 2])[0]
             answer = str(value)
             tally["scale_answers"] += 1
+            has_evidence = value <= 3
             if value == 3:
                 tally["scale_default_3"] += 1
-            has_evidence = value <= 3
+                # A 3 comes about two ways and only ONE of them is a drop
+                # candidate: the search found something and scored it 3, or it
+                # found nothing sufficient and the prompt's default stood. The
+                # second has no evidence to give, and it is the signal the whole
+                # deletion argument rests on — so it has to exist here, keyed off
+                # qnum rather than the RNG so a test can name the question.
+                if qnum % 3 == 0:
+                    has_evidence = False
+                    tally["scale_default_3_no_evidence"] += 1
         else:
             tally["text_answers"] += 1
             if rng.random() < 0.25:
@@ -465,6 +478,10 @@ def build_run_text(
             tally[
                 {None: "evidence_absent", "": "evidence_empty"}.get(evidence, "evidence_null")
             ] += 1
+            # Their parse renders "no evidence" as the literal token regardless of
+            # which of the three shapes our prose used — so ce_evidence_shape is
+            # NOT a copy of evidence_shape, and a test can tell them apart.
+            evidence_by_q[qnum] = "NULL"
             blocks.append(answer_block(qnum, answer, evidence))
             continue
 
@@ -480,10 +497,11 @@ def build_run_text(
             cites.append({"qnum": qnum, "url": url, "empty": False})
             tally["prose_citations"] += 1
         tally["evidence_present"] += 1
+        evidence_by_q[qnum] = evidence
         blocks.append(answer_block(qnum, answer, evidence))
 
     tally["answer_blocks"] += n_blocks
-    return "\n\n".join(blocks), cites, answers_by_q, tally
+    return "\n\n".join(blocks), cites, answers_by_q, evidence_by_q, tally
 
 
 def build_output_record(
@@ -500,6 +518,7 @@ def build_output_record(
     answer_parse_mismatch: bool = False,
     citation_shape_list: bool = False,
     website_conflict: bool = False,
+    prose_unparseable: bool = False,
 ) -> tuple[dict, Counter]:
     """One output/*.jsonl record, with optional planted defects."""
     answers, answer_dict, citation_evidence = {}, {}, {}
@@ -507,7 +526,43 @@ def build_output_record(
     for run in range(n_runs):
         key = f"run_{run}"
         n_blocks = N_QUESTIONS - 1 if (drop_one_block and run == 0) else N_QUESTIONS
-        text, cites, answers_by_q, run_tally = build_run_text(m, kinds, rng, n_blocks=n_blocks)
+        text, cites, answers_by_q, evidence_by_q, run_tally = build_run_text(
+            m, kinds, rng, n_blocks=n_blocks
+        )
+        # A run whose prose our block regex cannot read at all. On the real corpus
+        # this is 1,047 whole runs — every answer recovered from answer_dict, every
+        # evidence_text NULL because OUR parse failed, not because their pipeline
+        # found nothing. Without it the backstop and the ce evidence repair are
+        # both untested, and they would only ever run where nobody can watch.
+        #
+        # Their side of the record is left INTACT: answer_dict and
+        # citation_evidence still carry all 48 answers, their evidence and their
+        # URLs, because their pipeline read the prose fine. That asymmetry is the
+        # whole point — and it is why this run also, correctly, contributes a
+        # CITATION_SOURCE_MISMATCH.
+        if prose_unparseable and run == 0:
+            text = text.replace("\nA", "\n>>A")
+            # Its markdown links are still in the text, but no parsed block now
+            # encloses them, so the parser must count them as strays rather than
+            # let them vanish.
+            tally["citations_outside_blocks"] += (
+                run_tally["prose_citations"] + run_tally["empty_placeholders"]
+            )
+            # Every prose-derived golden count drops to zero for this run. They
+            # describe what a correct parser recovers, and from this run it
+            # recovers nothing — leaving them would assert the opposite.
+            for counter in (
+                "answer_blocks",
+                "evidence_present",
+                "evidence_null",
+                "evidence_empty",
+                "evidence_absent",
+                "prose_citations",
+                "empty_placeholders",
+            ):
+                run_tally[counter] = 0
+            tally["planted_prose_unparseable"] += 1
+            tally["answers_from_dict"] += n_blocks
         answers[key] = text
         tally.update(run_tally)
         tally["runs"] += 1
@@ -519,21 +574,39 @@ def build_output_record(
         if answer_parse_mismatch and run == 0:
             answer_dict[key]["A1"] = "5" if answer_dict[key].get("A1") != "5" else "1"
             tally["planted_parse_mismatch"] += 1
-        # citation_evidence is the second, independent citation source. Dropping
-        # entries here (but not from the prose) is what CITATION_SOURCE_MISMATCH
-        # must catch — it measures how lossy their post-processing is.
-        keep = cites[:-2] if (drop_citation_from_dict and run == 0) else cites
+        # citation_evidence is NOT a citation list — each entry is a complete
+        # per-answer record (operator-confirmed 2026-08-04), so there is one per
+        # ANSWER and most carry a null `citation`. Rendering one per *cited*
+        # question instead was the fixture's own divergence from reality, and it
+        # made `citation_evidence` look like a sparse citation source when it is
+        # actually a dense second parse of every answer.
+        dropped = (
+            {c["qnum"] for c in cites[-2:]} if (drop_citation_from_dict and run == 0) else set()
+        )
+        url_by_q = {c["qnum"]: c["url"] for c in cites}
         citation_evidence[key] = [
             {
-                "question": f"Q{c['qnum']}",
-                "a_key": f"A{c['qnum']}",
-                "answer": answers_by_q[c["qnum"]],
-                "citation": c["url"] or None,
-                "evidence": "supporting text",
-                "full_answer_block": answer_block(c["qnum"], answers_by_q[c["qnum"]], "e"),
+                "question": f"Q{qnum}",
+                "a_key": f"A{qnum}",
+                "answer": answer,
+                # Dropping the URL while the prose still shows one is what
+                # CITATION_SOURCE_MISMATCH must catch: it measures how lossy their
+                # post-processing is, and now does so without also deleting the
+                # answer that entry carries.
+                "citation": None if qnum in dropped else (url_by_q.get(qnum) or None),
+                "evidence": evidence_by_q.get(qnum),
+                "full_answer_block": answer_block(qnum, answer, evidence_by_q.get(qnum)),
             }
-            for c in keep
+            for qnum, answer in sorted(answers_by_q.items())
         ]
+        # Their two parses must be able to disagree with ours on DIFFERENT
+        # questions, or agree_with_dict and agree_with_ce are one measurement
+        # stored twice and `--answer-source` can never change a conclusion.
+        if answer_parse_mismatch and run == 0 and len(citation_evidence[key]) > 1:
+            entry = citation_evidence[key][1]
+            entry["answer"] = "5" if entry["answer"] != "5" else "1"
+            tally["planted_ce_mismatch"] += 1
+
         # §4 allows `citation` to be a string or null and says ANY other shape is an
         # anomaly. A two-URL list is the cheapest way to prove that detector fires.
         if citation_shape_list and run == 0 and citation_evidence[key]:
@@ -665,6 +738,7 @@ def write_fixtures() -> dict:
         20: {"n_runs": 2, "answer_parse_mismatch": True},
         21: {"n_runs": 2, "citation_shape_list": True},
         22: {"n_runs": 2, "website_conflict": True},
+        23: {"n_runs": 2, "prose_unparseable": True},
     }
     out_rng = random.Random(SEED + 3)
     out_tally: Counter[str] = Counter()
@@ -710,7 +784,10 @@ def write_fixtures() -> dict:
         "dup_output_se10": 1,
         "question_set_drift": 1,
         "answer_block_short_runs": 1,
-        "citation_source_mismatch_records": 1,
+        # Two records now: the one that drops URLs from citation_evidence, and the
+        # one whose prose we cannot parse at all — a run where OUR side loses the
+        # citations is just as much a source mismatch as one where theirs does.
+        "citation_source_mismatch_records": 2,
         "vote_value_list_records": 1,
         "empty_voted_final_records": 1,
         "answer_parse_mismatch_records": out_tally["planted_parse_mismatch"],
@@ -730,6 +807,15 @@ def write_fixtures() -> dict:
         "evidence_absent": out_tally["evidence_absent"],
         "prose_citations": out_tally["prose_citations"],
         "empty_placeholders": out_tally["empty_placeholders"],
+        # The answer_dict backstop: one whole run our block regex cannot read, so
+        # all 48 of its answers arrive from their parse instead of ours.
+        "prose_unparseable_runs": out_tally["planted_prose_unparseable"],
+        "answers_from_dict": out_tally["answers_from_dict"],
+        # The drop-candidate signal: a 3 that stood because nothing was found,
+        # not because a search supported it. Distinct from scale_default_3.
+        "scale_default_3_no_evidence": out_tally["scale_default_3_no_evidence"],
+        "ce_answer_mismatch": out_tally["planted_ce_mismatch"],
+        "citations_outside_blocks": out_tally["citations_outside_blocks"],
     }
 
     golden["expected_anomaly_codes"] = sorted(

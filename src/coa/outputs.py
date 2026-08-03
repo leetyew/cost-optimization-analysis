@@ -243,6 +243,48 @@ def _run_answer_map(answer_dict: dict, run_key: str) -> dict[int, str]:
     return out
 
 
+def _run_ce_map(evidence: dict, run_key: str) -> dict[int, tuple[str | None, str | None]]:
+    """Their `(answer, evidence)` for one run, keyed by qnum.
+
+    `citation_evidence` is not a citation list — each entry is a complete
+    per-answer record (`question`, `a_key`, `answer`, `citation`, `evidence`,
+    `full_answer_block`), so it carries the two fields our prose regex extracts,
+    already parsed by the pipeline that produced the prose.
+
+    That makes it the repair path for the runs whose prose we cannot parse at
+    all: on the real corpus 1,047 whole runs yielded no blocks, and every one of
+    their answers had a NULL `evidence_text` purely because our regex missed,
+    not because the pipeline found nothing.
+
+    Entries without a usable `a_key` are skipped here and counted by the citation
+    pass, which sees the same list — this is a lookup, not a validation step.
+    """
+    entries = evidence.get(run_key)
+    if not isinstance(entries, list):
+        return {}
+    out: dict[int, tuple[str | None, str | None]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        qnum = _qnum(entry.get("a_key") or "")
+        if qnum is None:
+            continue
+        out[qnum] = (_ce_text(entry.get("answer")), _ce_text(entry.get("evidence")))
+    return out
+
+
+def _ce_text(value: object) -> str | None:
+    """One citation_evidence text field, or None when it carries nothing.
+
+    A non-string is JSON-encoded rather than dropped: the shape is confirmed for
+    `citation` but never stated for `answer` / `evidence`, and stringifying keeps
+    the value visible for `coa doctor` instead of losing it to a type check.
+    """
+    if value is None:
+        return None
+    return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+
+
 def normalize_vote(value: object) -> tuple[str | None, bool]:
     """`(stored_text, is_ambiguous)` for one vote value.
 
@@ -402,16 +444,11 @@ def _ingest_record(
         )
 
     canonical = _canonical_qnums(conn) or set(questions)
-    # Each run's prose URLs are kept from the answer pass and handed to the
-    # cross-check, rather than re-parsing the run text there: the block regex over
-    # 48 blocks is the heaviest thing this parser does, and running it twice per
-    # run doubles the cost of the whole ingest for nothing.
-    prose_urls: dict[str, dict[int, set[str]]] = {}
-    for run_key, text in answers.items():
-        prose_urls[run_key] = _store_run(
-            ctx, run_key, text if isinstance(text, str) else "", answer_dict, canonical
-        )
 
+    # Located BEFORE the answer pass, not after: each citation_evidence entry is a
+    # complete per-answer record carrying `answer` and `evidence`, so it is an
+    # answer source, not just a citation source. Reading it afterwards would mean
+    # a second pass to graft those fields onto rows already written.
     evidence = record.get(CITATION_EVIDENCE_KEY)
     if not isinstance(evidence, dict) or not evidence:
         # Reading the wrong location produced zero dict citations across the entire
@@ -427,10 +464,27 @@ def _ingest_record(
             detail=(
                 f"`{CITATION_EVIDENCE_KEY}` is {_shape(evidence)}, expected a map "
                 "keyed by run; the prose-vs-dict cross-check cannot run for this "
-                f"record. Top-level keys present: {_capped(sorted(record))}"
+                f"record, and its answers lose their only non-prose evidence. "
+                f"Top-level keys present: {_capped(sorted(record))}"
             ),
         )
         evidence = {}
+
+    # Each run's prose URLs are kept from the answer pass and handed to the
+    # cross-check, rather than re-parsing the run text there: the block regex over
+    # 48 blocks is the heaviest thing this parser does, and running it twice per
+    # run doubles the cost of the whole ingest for nothing.
+    #
+    # The union of run keys, not just the answer map's: a run present only in
+    # citation_evidence still has 48 parsed answers, and iterating one map would
+    # drop them with nothing but a run-count discrepancy to show for it.
+    prose_urls: dict[str, dict[int, set[str]]] = {}
+    for run_key in sorted(set(answers) | set(evidence)):
+        text = answers.get(run_key)
+        prose_urls[run_key] = _store_run(
+            ctx, run_key, text if isinstance(text, str) else "", answer_dict, evidence, canonical
+        )
+
     _store_dict_citations(ctx, evidence, prose_urls)
     _store_votes(ctx, answer_dict)
     _check_convenience_keys(ctx, record)
@@ -544,9 +598,17 @@ def _store_run(
     run_key: str,
     text: str,
     answer_dict: dict,
+    evidence: dict,
     canonical: set[int],
 ) -> dict[int, set[str]]:
     """Answers and prose citations for one run.
+
+    Three parses of the same prose land on each answer row — ours, plus the two
+    the other team's pipeline produced (`citation_evidence`, `answer_dict`). None
+    of them wins here. Which source is authoritative is a question the corpus
+    answers, and `coa scorecard --answer-source` switches between them at query
+    time precisely so that changing our mind costs a SQL clause rather than a
+    re-ingest of a 19k-merchant corpus across the air gap.
 
     Returns that run's non-empty prose URLs per qnum, which the citation
     cross-check consumes instead of re-parsing the same text.
@@ -571,7 +633,35 @@ def _store_run(
 
     blocks = parse_answer_blocks(text)
     theirs = _run_answer_map(answer_dict, run_key)
+    ce = _run_ce_map(evidence, run_key)
     rows, disagreed = [], []
+
+    def _row(
+        qnum: int | None,
+        answer: str,
+        ev: str | None,
+        source: str,
+        agree_dict: int | None = None,
+    ) -> tuple:
+        """One answer row, carrying whichever of the three parses exist for it."""
+        ce_answer, ce_evidence = ce.get(qnum, (None, None)) if qnum is not None else (None, None)
+        agree_ce = None if ce_answer is None else int(_norm_text(answer) == _norm_text(ce_answer))
+        if ce_answer is not None:
+            ctx.stats["out_ce_comparable" if agree_ce else "out_ce_disagreements"] += 1
+        return (
+            ctx.se10,
+            ctx.output_id,
+            run_id,
+            qnum,
+            answer,
+            ev,
+            ce_answer,
+            ce_evidence,
+            int(is_null_answer(answer)),
+            source,
+            agree_dict,
+            agree_ce,
+        )
 
     for block in blocks:
         ctx.stats[evidence_shape(block.evidence)] += 1
@@ -583,14 +673,10 @@ def _store_run(
             if not agree:
                 disagreed.append(block.qnum)
         rows.append(
-            (
-                ctx.se10,
-                ctx.output_id,
-                run_id,
+            _row(
                 block.qnum,
                 mine,
                 None if block.evidence is None else block.evidence.strip(),
-                int(is_null_answer(mine)),
                 "answers_text",
                 agree,
             )
@@ -602,23 +688,23 @@ def _store_run(
     seen = {b.qnum for b in blocks}
     for qnum in sorted(set(theirs) - seen):
         ctx.stats["out_answers_from_dict"] += 1
-        rows.append(
-            (
-                ctx.se10,
-                ctx.output_id,
-                run_id,
-                qnum,
-                theirs[qnum],
-                None,
-                int(is_null_answer(theirs[qnum])),
-                "answer_dict",
-                None,
-            )
-        )
+        rows.append(_row(qnum, theirs[qnum], None, "answer_dict"))
+
+    # Third backstop, and the only one that can supply evidence. A qnum reaching
+    # here was missed by BOTH our regex and answer_dict, so without it the answer
+    # would vanish from the per-question rates entirely — the failure invariant 1
+    # exists to prevent.
+    for qnum in sorted(set(ce) - seen - set(theirs)):
+        ce_answer, _ = ce[qnum]
+        if ce_answer is None:
+            continue
+        ctx.stats["out_answers_from_ce"] += 1
+        rows.append(_row(qnum, ce_answer, None, "citation_evidence"))
 
     ctx.conn.executemany(
         "INSERT INTO answers (se10, output_id, run_id, qnum, answer_text, evidence_text, "
-        "is_null, parsed_from, agree_with_dict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "ce_answer, ce_evidence, is_null, parsed_from, agree_with_dict, agree_with_ce) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 

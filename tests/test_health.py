@@ -99,5 +99,8 @@ def test_no_anomalies_is_labelled_suspicious(conn: sqlite3.Connection) -> None:
 
 def test_corpus_report_is_paste_sized(corpus) -> None:
     out = health_report(corpus.conn)
-    assert len(out.splitlines()) < 60, "doctor output must stay pasteable"
+    # One terminal screen. The ANSWER SOURCES block earns its six lines: it is the
+    # only way the operator can tell whether citation_evidence covers every answer,
+    # and the alternative is an ad-hoc SQL round-trip across the air gap.
+    assert len(out.splitlines()) < 80, "doctor output must stay pasteable"
     assert "canonical set          48" in out
