@@ -267,9 +267,42 @@ default-3 answers that carry no evidence. What remains unrendered is called out 
 | The `answer_dict` backstop rescued **1,047 whole runs** | confirmed — 50,256 dict-parsed answers = 1,047 x 48, i.e. runs where prose parsing yielded *nothing* and every answer came from the dict. Invariant 1 working as designed; worth diagnosing why their prose differs |
 | **50.5% of all answers are literally `NULL`** (1,223,141 of 2,420,160) | confirmed, and it is the headline candidate. Too large to be the free-text questions alone, so either far more questions are free-text than assumed, or scale questions also return NULL. P4's per-qnum split decides which |
 | 80 merchants appear in `input/` and `output/` but have **no logs** | confirmed — 19,349 vs 19,269. 0.4%; they have answers but no search calls, so they must be excluded from any per-merchant call or cost denominator |
-| **`pii_terms` is exactly 1.000 per merchant** (19,349 / 19,349) | confirmed, and the cause is now pinned: **`PII_FIELDS` matches 1 of its 10 keys — only `se_toc_name`**. The other nine (`street`, `owner_street`, `city`, `owner_city`, `owner_postal`, `phone`, `email`, `signer_name`, `owner_name`) are spelled differently in the real input schema. P3 templating would leave merchant streets, phones, emails and owner names unmasked — a privacy problem, not a metrics one. `coa doctor`'s INPUT SCHEMA / PII block prints the real key names to remap onto; **the remap is still outstanding** |
+| **`pii_terms` was exactly 1.000 per merchant** (19,349 / 19,349) | **RESOLVED 2026-08-04.** Only `se_toc_name` matched; every other key was spelled differently. The real 29-key schema is now encoded in `MERCHANT_KEY_BY_COLUMN` and `PII_FIELDS` (see below) and rendered by `gen_fixtures.py`. The blast radius was wider than PII: `MERCHANT_KEYS` used the same spellings, so **14 of 15 `merchants` columns were NULL for all 19,349 merchants** — only `website` ever matched |
 | Every search call has a singular `query` | confirmed — 592,710 billed `query_instances` rows = the search-call count exactly, and `CALL_FIELD_MISSING` is 0. Sub-queries are 1,805,026 = 3.05 per call, consistent with a constant `len(queries) == 4` minus the verbatim dedup |
 | The pasted DB **predates the `QUERY_REQUOTED` split** (commit `0402168`) | inferred — `QUERY_NOT_IN_QUERIES` still reads 17,231, the pre-split figure, and `QUERY_REQUOTED` is absent. Anomalies are written at ingest and `coa doctor` only reads them. `coa reparse` refreshes the parse but writes its rows under `stage='reparse'` while leaving the old `stage='weblogs'` rows in place, so the codes would then double-count in doctor's tally |
+
+### The real `input/*.jsonl` schema (operator-supplied 2026-08-04)
+
+All 29 keys, verbatim. Encoded in `MERCHANT_KEY_BY_COLUMN` / `PII_FIELDS` and rendered by
+`gen_fixtures.py`. **Spellings are load-bearing** — the fixture previously invented tidy
+names (`city`, `phone`, `owner_name`), which matched the parser by construction and let a
+corpus with 14 empty columns pass the whole suite.
+
+```
+se10  se_toc_name  sell_dba_nm  sell_lgl_nm  sell_ctry_cd  sell_pstl_cd  state_name
+Seller_City_Name  Seller_Street_Address  Seller_Email_Address  Business_Phone_No
+Significant_Owner_Name  Significant_Owner_City_Name  Significant_Owner_Postal_Code
+Significant_Owner_Street_Address  Primary_Auhorized_Signer_Name
+Authorized_Signer_Physical_Address  merchant_opening_date  merchant_sub_category
+wwic_industry_tagged  WWIC_Code  HRSE_tagged_merchant_ind  se_not_good_seller_ind
+se_not_good_reason  obligor_id  obligor_id_recency_indicator  rno  type_of_se  website
+```
+
+Three things to know about it:
+
+- **`Primary_Auhorized_Signer_Name` is missing a `t`.** That is how the schema spells it, so
+  that is how the parser reads it. "Correcting" it in either the parser or the fixture blanks
+  the column. If `coa doctor`'s per-column fill shows `signer_name` at 0% while its
+  neighbours are populated, the typo was a transcription slip and the constant is the fix.
+- **Four PII-bearing keys have no `merchants` column** and reach `pii_terms` only:
+  `sell_dba_nm`, `sell_lgl_nm` (trade and legal names — a query is at least as likely to use
+  these as `se_toc_name`), `sell_pstl_cd` (the SELLER postal code; only the owner's was
+  mapped before), and `Authorized_Signer_Physical_Address` (a person's home address).
+- **`se_not_good_seller_ind` / `se_not_good_reason` look like ground-truth fraud labels**
+  — UNCONFIRMED, inferred from the names alone. The `labels(se10, label, source, ts)` table
+  was reserved for exactly this, and if the inference holds it upgrades the whole analysis
+  from "which questions carry no information" to "which questions predict the label". Worth
+  one question to the operator before anything is built on it.
 
 ### The decision lever is the question, not the query
 

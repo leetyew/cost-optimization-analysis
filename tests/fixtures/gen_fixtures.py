@@ -75,28 +75,48 @@ def build_merchants(rng: random.Random) -> list[dict]:
             digits,
         ][i % 3]
         domain = f"{first.lower()}{second.lower()}.example"
+        # The REAL input schema, key for key (operator-supplied 2026-08-04). The
+        # fixture used to invent tidy names — `city`, `phone`, `owner_name` — and
+        # every one of them matched the parser by construction, so a corpus where
+        # 14 of 15 merchant columns were NULL and pii_terms found one term per
+        # merchant passed the whole suite. Spellings are load-bearing here.
         merchants.append(
             {
                 "se10": se10,
                 "se_toc_name": name,
-                "opening_date": f"20{15 + i % 8}-0{1 + i % 9}-1{i % 9}",
-                "city": city,
-                "state": STATES[i % len(STATES)],
-                "country": "US",
-                "industry_tagged": INDUSTRIES[i % len(INDUSTRIES)],
-                "sub_category": f"sub_{i % 4}",
-                "email": f"contact@{domain}",
-                "phone": phone,
-                "street": f"{100 + i * 3} {second} Street",
-                "signer_name": f"Pat {second}",
-                "owner_name": f"Casey {first}",
-                "owner_city": city,
-                "owner_postal": f"{60000 + i * 11}",
-                "owner_street": f"{200 + i * 5} Elm Avenue",
+                "sell_dba_nm": f"{first} {second}",
+                "sell_lgl_nm": f"{name}, Limited",
+                "merchant_opening_date": f"20{15 + i % 8}-0{1 + i % 9}-1{i % 9}",
+                "Seller_City_Name": city,
+                "state_name": STATES[i % len(STATES)],
+                "sell_ctry_cd": "US",
+                "wwic_industry_tagged": INDUSTRIES[i % len(INDUSTRIES)],
+                "merchant_sub_category": f"sub_{i % 4}",
+                "Seller_Email_Address": f"contact@{domain}",
+                "Business_Phone_No": phone,
+                "Seller_Street_Address": f"{100 + i * 3} {second} Street",
+                "sell_pstl_cd": f"{70000 + i * 13}",
+                # Their spelling, missing the 't'. Reproduced deliberately: the
+                # parser reads this exact string, so a "helpful" correction in
+                # either place blanks the column.
+                "Primary_Auhorized_Signer_Name": f"Pat {second}",
+                "Authorized_Signer_Physical_Address": f"{300 + i * 7} Cedar Court",
+                "Significant_Owner_Name": f"Casey {first}",
+                "Significant_Owner_City_Name": city,
+                "Significant_Owner_Postal_Code": f"{60000 + i * 11}",
+                "Significant_Owner_Street_Address": f"{200 + i * 5} Elm Avenue",
                 "website": f"https://{domain}",
                 # "many more keys" — the parser must preserve what it does not name.
-                "internal_risk_bucket": rng.choice(["low", "medium", "high"]),
-                "legacy_flag": rng.choice([0, 1]),
+                # These are the real ones; se_not_good_* look like ground-truth
+                # labels and are UNCONFIRMED as such — see CLAUDE.md.
+                "HRSE_tagged_merchant_ind": rng.choice(["Y", "N"]),
+                "se_not_good_seller_ind": rng.choice(["Y", "N"]),
+                "se_not_good_reason": rng.choice(["", "chargebacks", "identity"]),
+                "WWIC_Code": f"{5000 + i}",
+                "obligor_id": f"OB{100000 + i}",
+                "obligor_id_recency_indicator": rng.choice([0, 1]),
+                "rno": f"R{200000 + i}",
+                "type_of_se": rng.choice(["SP", "CORP", "LLC"]),
             }
         )
     return merchants
@@ -158,7 +178,7 @@ def build_questions(m: dict) -> list[str]:
         # One inlined merchant value per text question, exactly as the real prompt
         # does. `owner_postal` is also a pii_terms entry, so P3's templating has
         # something real to bite on when it masks question text for the report.
-        where = f" at {m['owner_postal']}" if kind == "text" else ""
+        where = f" at {m['Significant_Owner_Postal_Code']}" if kind == "text" else ""
         out.append(f"{stem}{where} (variant {i // len(QUESTION_SPECS) + 1})?\n{instruction}")
     return out
 
@@ -193,9 +213,9 @@ def queries_for(m: dict, rng: random.Random) -> list[str]:
         f"{name} scam",
         f"{name} reviews",
         f"{name} fraud complaints",
-        f"{name} {m['city']} address",
-        f"{m['phone']} business listing",
-        f"{m['email']} domain owner",
+        f"{name} {m['Seller_City_Name']} address",
+        f"{m['Business_Phone_No']} business listing",
+        f"{m['Seller_Email_Address']} domain owner",
         f"{name} BBB rating",
         "BBB complaints database",  # generic: no placeholder should fire
     ]
@@ -465,7 +485,10 @@ def build_run_text(
             elif qnum % 2:
                 # Address-shaped: commas inside a free-text answer, plus real PII
                 # for P3's templating to bite on.
-                answer, has_evidence = f"{m['street']}, {m['city']}, {m['state']}", True
+                answer, has_evidence = (
+                    f"{m['Seller_Street_Address']}, {m['Seller_City_Name']}, {m['state_name']}",
+                    True,
+                )
             else:
                 answer, has_evidence = rng.choice(BUILDING_TYPES), True
 
@@ -664,8 +687,8 @@ def build_output_record(
         # divergence here must surface as INPUT_OUTPUT_FIELD_CONFLICT, never be
         # written over the merchant row.
         "website": "https://conflicting.example" if website_conflict else m["website"],
-        "industry": m["industry_tagged"],
-        "state": m["state"],
+        "industry": m["wwic_industry_tagged"],
+        "state": m["state_name"],
     }
     if website_conflict:
         tally["planted_field_conflict"] += 1

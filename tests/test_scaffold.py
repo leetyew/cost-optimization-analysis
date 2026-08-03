@@ -438,7 +438,7 @@ def test_source_lines_are_streamed_not_materialized(tmp_path: Path) -> None:
 
 def test_question_set_is_48_and_extractable() -> None:
     """The extraction regex from PLAN.md §4 must recover all 48 questions."""
-    qs = gen_fixtures.build_questions({"owner_postal": "60000"})
+    qs = gen_fixtures.build_questions({"Significant_Owner_Postal_Code": "60000"})
     prompt = gen_fixtures.user_prompt(qs)
     found = re.findall(r"Q(\d+)\.\s*(.*?)(?=\nQ\d+\.|\Z)", prompt, re.S)
     assert len(found) == 48

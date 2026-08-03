@@ -31,36 +31,63 @@ from .config import Config
 # truncated megabyte, and the operator only needs the head to recognize it.
 BAD_JSON_EXCERPT = 500
 
-# Columns `merchants` names explicitly. Everything else survives in raw_json.
-MERCHANT_KEYS: tuple[str, ...] = (
-    "opening_date",
-    "city",
-    "industry_tagged",
-    "sub_category",
-    "email",
-    "phone",
-    "street",
-    "signer_name",
-    "owner_name",
-    "owner_city",
-    "owner_postal",
-    "owner_street",
-    "website",
-    "country",
-    "state",
-)
+# `merchants` column -> the record key that fills it.
+#
+# A mapping rather than a tuple because the two genuinely differ. The real input
+# schema (operator-supplied 2026-08-04) shares exactly ONE spelling with the names
+# this table uses: `website`. The other fourteen columns were NULL for all 19,349
+# merchants, and nothing said so — `coa doctor`'s per-column fill rates exist now
+# for precisely that reason.
+#
+# `Primary_Auhorized_Signer_Name` is spelled as the schema spells it. The missing
+# 't' is theirs; correcting it here would silently blank the column. If the fill
+# rate for `signer_name` comes back 0% while its neighbours are populated, the
+# typo was a transcription slip and this is the line to fix.
+MERCHANT_KEY_BY_COLUMN: dict[str, str] = {
+    "opening_date": "merchant_opening_date",
+    "city": "Seller_City_Name",
+    "industry_tagged": "wwic_industry_tagged",
+    "sub_category": "merchant_sub_category",
+    "email": "Seller_Email_Address",
+    "phone": "Business_Phone_No",
+    "street": "Seller_Street_Address",
+    "signer_name": "Primary_Auhorized_Signer_Name",
+    "owner_name": "Significant_Owner_Name",
+    "owner_city": "Significant_Owner_City_Name",
+    "owner_postal": "Significant_Owner_Postal_Code",
+    "owner_street": "Significant_Owner_Street_Address",
+    "website": "website",
+    "country": "sell_ctry_cd",
+    "state": "state_name",
+}
 
 # pii_terms.field -> the record keys that feed it. Several keys collapse into one
 # field on purpose: a query saying "123 Elm Avenue" should template to <STREET>
 # whether that address came from the business or its owner.
+#
+# Real spellings, operator-supplied 2026-08-04. Only `se_toc_name` matched before,
+# which is why the corpus produced exactly 1.000 term per merchant: every street,
+# phone, email and owner name in 19,349 records would have gone unmasked.
+#
+# Three keys here have no `merchants` column and are new to this map. They are
+# PII regardless of whether any column names them, and templating is the only
+# thing standing between them and a report:
+#   * `sell_dba_nm` / `sell_lgl_nm` — the doing-business-as and legal names, which
+#     a search query is at least as likely to use as `se_toc_name`.
+#   * `sell_pstl_cd` — the SELLER postal code. Only the owner's was mapped before.
+#   * `Authorized_Signer_Physical_Address` — a person's home address.
 PII_FIELDS: dict[str, tuple[str, ...]] = {
-    "name": ("se_toc_name",),
-    "street": ("street", "owner_street"),
-    "city": ("city", "owner_city"),
-    "zip": ("owner_postal",),
-    "phone": ("phone",),
-    "email": ("email",),
-    "owner": ("signer_name", "owner_name"),
+    "name": ("se_toc_name", "sell_dba_nm", "sell_lgl_nm"),
+    "street": (
+        "Seller_Street_Address",
+        "Significant_Owner_Street_Address",
+        "Authorized_Signer_Physical_Address",
+    ),
+    "city": ("Seller_City_Name", "Significant_Owner_City_Name"),
+    "zip": ("Significant_Owner_Postal_Code", "sell_pstl_cd"),
+    "phone": ("Business_Phone_No",),
+    "email": ("Seller_Email_Address",),
+    "owner": ("Significant_Owner_Name", "Primary_Auhorized_Signer_Name"),
 }
 
 # Shorter than this and a "PII term" starts matching ordinary English inside a
@@ -181,15 +208,29 @@ def ingest_input(
             )
             continue
 
+        columns = tuple(MERCHANT_KEY_BY_COLUMN)
         conn.execute(
             "INSERT INTO merchants (se10, raw_json, src_file, src_line, "
-            + ", ".join(MERCHANT_KEYS)
+            + ", ".join(columns)
             + ") VALUES (?, ?, ?, ?, "
-            + ", ".join("?" * len(MERCHANT_KEYS))
+            + ", ".join("?" * len(columns))
             + ")",
-            (se10, raw, src_name, line_no, *(_scalar(record.get(k)) for k in MERCHANT_KEYS)),
+            (
+                se10,
+                raw,
+                src_name,
+                line_no,
+                *(_scalar(record.get(MERCHANT_KEY_BY_COLUMN[c])) for c in columns),
+            ),
         )
         stats["in_records"] += 1
+        # Per-column fill, so a key that stops matching shows up as a number rather
+        # than as a table of NULLs nobody queries. Fourteen of these were empty for
+        # the whole real corpus and the only trace was `pii terms 1.000 per
+        # merchant`, two layers away.
+        for column, key in MERCHANT_KEY_BY_COLUMN.items():
+            if record.get(key) not in (None, ""):
+                stats[f"in_col_{column}"] += 1
 
         terms = pii_terms_for(record)
         if not terms:

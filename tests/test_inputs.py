@@ -19,18 +19,26 @@ from coa.inputs import ingest_input, pii_terms_for
 
 CFG = Config.load(Path(__file__).parent.parent / "config.yaml")
 
+# The REAL input-schema spellings (operator-supplied 2026-08-04). Inventing tidy
+# names here is what let every one of these tests pass against a corpus where only
+# `se_toc_name` actually matched.
 MERCHANT = {
     "se10": 1000000001,
     "se_toc_name": "Acme Widgets LLC",
-    "city": "Springfield",
-    "street": "100 Widgets Street",
-    "owner_street": "200 Elm Avenue",
-    "owner_city": "Springfield",
-    "owner_postal": "60000",
-    "phone": "(555) 200-0000",
-    "email": "contact@acmewidgets.example",
-    "signer_name": "Pat Widgets",
-    "owner_name": "Casey Acme",
+    "sell_dba_nm": "Acme Widgets",
+    "sell_lgl_nm": "Acme Widgets LLC, Limited",
+    "Seller_City_Name": "Springfield",
+    "Seller_Street_Address": "100 Widgets Street",
+    "sell_pstl_cd": "70000",
+    "Significant_Owner_Street_Address": "200 Elm Avenue",
+    "Significant_Owner_City_Name": "Springfield",
+    "Significant_Owner_Postal_Code": "60000",
+    "Business_Phone_No": "(555) 200-0000",
+    "Seller_Email_Address": "contact@acmewidgets.example",
+    # Their spelling, missing the 't'. Do not "fix" it — see inputs.py.
+    "Primary_Auhorized_Signer_Name": "Pat Widgets",
+    "Authorized_Signer_Physical_Address": "300 Cedar Court",
+    "Significant_Owner_Name": "Casey Acme",
     "website": "https://acmewidgets.example",
     "unnamed_extra_key": {"nested": [1, 2]},
 }
@@ -81,11 +89,16 @@ def test_terms_are_casefolded_and_whitespace_collapsed() -> None:
 
 def test_short_values_are_dropped() -> None:
     """A two-character term would template half the corpus."""
-    assert all(len(v) >= 3 for _, v in pii_terms_for(dict(MERCHANT, city="IL")))
+    assert all(len(v) >= 3 for _, v in pii_terms_for(dict(MERCHANT, Seller_City_Name="IL")))
 
 
 def test_missing_and_empty_fields_are_skipped() -> None:
-    sparse = {"se10": "1", "se_toc_name": "Acme Widgets LLC", "phone": None, "email": ""}
+    sparse = {
+        "se10": "1",
+        "se_toc_name": "Acme Widgets LLC",
+        "Business_Phone_No": None,
+        "Seller_Email_Address": "",
+    }
     assert {f for f, _ in pii_terms_for(sparse)} == {"name"}
 
 
@@ -107,7 +120,7 @@ def test_se10_is_normalized_to_text(conn: sqlite3.Connection) -> None:
 
 def test_non_scalar_field_value_is_stored_not_fatal(conn: sqlite3.Connection) -> None:
     """A list where a string was expected must not take down the whole file."""
-    stats, _ = run(conn, [dict(MERCHANT, city=["Springfield", "Riverton"])])
+    stats, _ = run(conn, [dict(MERCHANT, Seller_City_Name=["Springfield", "Riverton"])])
     assert stats["in_records"] == 1
     assert json.loads(conn.execute("SELECT city FROM merchants").fetchone()["city"]) == [
         "Springfield",
@@ -116,7 +129,7 @@ def test_non_scalar_field_value_is_stored_not_fatal(conn: sqlite3.Connection) ->
 
 
 def test_duplicate_se10_keeps_first_and_is_flagged(conn: sqlite3.Connection) -> None:
-    stats, rec = run(conn, [MERCHANT, dict(MERCHANT, city="Elsewhere")])
+    stats, rec = run(conn, [MERCHANT, dict(MERCHANT, Seller_City_Name="Elsewhere")])
     assert stats["in_records"] == 1
     assert stats["in_dup_se10"] == 1
     assert rec.counts["DUP_INPUT_SE10"] == 1

@@ -97,6 +97,28 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
     if not n_sampled:
         return out + [_line("input schema", "no parseable merchant raw_json to sample")]
 
+    # Per-column fill on `merchants`. This is the line whose absence let 14 of 15
+    # columns sit NULL for 19,349 merchants across a full real ingest, visible only
+    # as a thin `pii_terms` two layers downstream.
+    from .inputs import MERCHANT_KEY_BY_COLUMN
+
+    n_m = _scalar(conn, "SELECT COUNT(*) FROM merchants")
+    filled = conn.execute(
+        "SELECT "
+        + ", ".join(f"SUM({c} IS NOT NULL AND {c} != '') AS {c}" for c in MERCHANT_KEY_BY_COLUMN)
+        + " FROM merchants"
+    ).fetchone()
+    empty = [c for c in MERCHANT_KEY_BY_COLUMN if not (filled[c] or 0)]
+    out.append(
+        _line(
+            "merchant columns",
+            f"{len(MERCHANT_KEY_BY_COLUMN) - len(empty)} of {len(MERCHANT_KEY_BY_COLUMN)} "
+            f"populated over {n_m:,} merchants",
+        )
+    )
+    if empty:
+        out.append(_line("  EMPTY columns", ", ".join(empty) + "   <-- key names do not match"))
+
     matched, missing = sorted(wanted & present), sorted(wanted - present)
     out.append(_line("PII_FIELDS found", f"{len(matched)} of {len(wanted)}: {', '.join(matched)}"))
     out.append(
