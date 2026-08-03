@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import Counter
 
 # Wide enough for a label, narrow enough that the block still pastes cleanly.
 _LABEL = 22
@@ -47,6 +48,26 @@ _SCHEMA_SAMPLE = 200
 
 # The key list can be long, and this block has to stay pasteable.
 _MAX_KEYS = 60
+
+# Input keys that MIGHT carry a ground-truth outcome. No `merchants` column names
+# them, so without this they are invisible: they exist only inside `raw_json`.
+#
+# The operator reports `se_not_good_seller_ind` as "mainly null" and does not yet
+# know what it means. "Mainly" versus "entirely" is the whole question — a label
+# present on even a few percent of merchants would upgrade the analysis from
+# "which questions carry no information" to "which questions predict the outcome",
+# which is a far stronger case for cutting one. Nothing is built on that until
+# these counts come back; this only measures.
+_LABEL_CANDIDATE_KEYS = (
+    "se_not_good_seller_ind",
+    "se_not_good_reason",
+    "HRSE_tagged_merchant_ind",
+)
+
+# Show actual values only when the key behaves like a coded flag. A free-text
+# reason field could carry merchant specifics, and this block is meant to be
+# retyped across the air gap — so cardinality gates disclosure.
+_MAX_SHOWN_VALUES = 8
 
 
 def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
@@ -84,15 +105,25 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
 
     wanted = {key for keys in PII_FIELDS.values() for key in keys}
     present: set[str] = set()
-    n_sampled = 0
-    for row in conn.execute("SELECT raw_json FROM merchants LIMIT ?", (_SCHEMA_SAMPLE,)):
+    n_sampled = n_schema = 0
+    # Counted over EVERY merchant, not the schema sample: "is it ever non-null"
+    # cannot be answered from 200 rows when the answer might be "0.3% of 19,349".
+    label_values: dict[str, Counter] = {k: Counter() for k in _LABEL_CANDIDATE_KEYS}
+    for row in conn.execute("SELECT raw_json FROM merchants"):
         try:
             record = json.loads(row["raw_json"])
         except (TypeError, ValueError):
             continue
-        if isinstance(record, dict):
-            n_sampled += 1
+        if not isinstance(record, dict):
+            continue
+        if n_schema < _SCHEMA_SAMPLE:
             present.update(record)
+            n_schema += 1
+        n_sampled += 1
+        for key in _LABEL_CANDIDATE_KEYS:
+            value = record.get(key)
+            if value not in (None, ""):
+                label_values[key][str(value)] += 1
 
     if not n_sampled:
         return out + [_line("input schema", "no parseable merchant raw_json to sample")]
@@ -129,8 +160,35 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
     keys = sorted(present)
     shown = ", ".join(keys[:_MAX_KEYS])
     extra = f" ... (+{len(keys) - _MAX_KEYS} more)" if len(keys) > _MAX_KEYS else ""
-    out.append(_line("input keys seen", f"{len(keys)} over {n_sampled} records"))
+    out.append(_line("input keys seen", f"{len(keys)} over {n_schema} records"))
     out.append(f"    {shown}{extra}")
+    out += _label_candidate_lines(label_values, n_sampled, present)
+    return out
+
+
+def _label_candidate_lines(values: dict[str, Counter], n: int, present: set[str]) -> list[str]:
+    """Fill rate for keys that might hold a ground-truth outcome.
+
+    Reports a rate rather than a yes/no because "mainly null" and "entirely null"
+    are different answers with different consequences, and only one of them can be
+    checked by eye. A key absent from the schema entirely says so, rather than
+    reporting 0% and reading as "present but empty".
+
+    Values are shown only for low-cardinality keys — a coded flag is safe to
+    retype, a free-text reason field might carry merchant specifics.
+    """
+    out = ["", "  LABEL CANDIDATES (unmapped keys that may hold ground truth)"]
+    for key in _LABEL_CANDIDATE_KEYS:
+        if key not in present:
+            out.append(_line(f"  {key}", "not in the schema sample"))
+            continue
+        counts = values[key]
+        filled = sum(counts.values())
+        share = f"{filled / n:.2%}" if n else "n/a"
+        detail = f"{filled:,} of {n:,} non-null ({share}), {len(counts)} distinct"
+        if 0 < len(counts) <= _MAX_SHOWN_VALUES:
+            detail += ": " + ", ".join(f"{v}={c:,}" for v, c in counts.most_common())
+        out.append(_line(f"  {key}", detail))
     return out
 
 

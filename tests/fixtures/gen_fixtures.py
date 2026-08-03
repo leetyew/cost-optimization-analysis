@@ -96,10 +96,7 @@ def build_merchants(rng: random.Random) -> list[dict]:
                 "Business_Phone_No": phone,
                 "Seller_Street_Address": f"{100 + i * 3} {second} Street",
                 "sell_pstl_cd": f"{70000 + i * 13}",
-                # Their spelling, missing the 't'. Reproduced deliberately: the
-                # parser reads this exact string, so a "helpful" correction in
-                # either place blanks the column.
-                "Primary_Auhorized_Signer_Name": f"Pat {second}",
+                "Primary_Authorized_Signer_Name": f"Pat {second}",
                 "Authorized_Signer_Physical_Address": f"{300 + i * 7} Cedar Court",
                 "Significant_Owner_Name": f"Casey {first}",
                 "Significant_Owner_City_Name": city,

@@ -39,10 +39,10 @@ BAD_JSON_EXCERPT = 500
 # merchants, and nothing said so — `coa doctor`'s per-column fill rates exist now
 # for precisely that reason.
 #
-# `Primary_Auhorized_Signer_Name` is spelled as the schema spells it. The missing
-# 't' is theirs; correcting it here would silently blank the column. If the fill
-# rate for `signer_name` comes back 0% while its neighbours are populated, the
-# typo was a transcription slip and this is the line to fix.
+# Every spelling here is load-bearing: a key that does not match produces a silent
+# column of NULLs, never an error. `coa doctor`'s per-column fill is the check —
+# a column at 0% while its neighbours populate means this map is wrong, not that
+# the data is empty.
 MERCHANT_KEY_BY_COLUMN: dict[str, str] = {
     "opening_date": "merchant_opening_date",
     "city": "Seller_City_Name",
@@ -51,7 +51,7 @@ MERCHANT_KEY_BY_COLUMN: dict[str, str] = {
     "email": "Seller_Email_Address",
     "phone": "Business_Phone_No",
     "street": "Seller_Street_Address",
-    "signer_name": "Primary_Auhorized_Signer_Name",
+    "signer_name": "Primary_Authorized_Signer_Name",
     "owner_name": "Significant_Owner_Name",
     "owner_city": "Significant_Owner_City_Name",
     "owner_postal": "Significant_Owner_Postal_Code",
@@ -87,7 +87,7 @@ PII_FIELDS: dict[str, tuple[str, ...]] = {
     "zip": ("Significant_Owner_Postal_Code", "sell_pstl_cd"),
     "phone": ("Business_Phone_No",),
     "email": ("Seller_Email_Address",),
-    "owner": ("Significant_Owner_Name", "Primary_Auhorized_Signer_Name"),
+    "owner": ("Significant_Owner_Name", "Primary_Authorized_Signer_Name"),
 }
 
 # Shorter than this and a "PII term" starts matching ordinary English inside a

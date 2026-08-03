@@ -7,6 +7,7 @@ the operator runs it precisely when something looks wrong.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -102,7 +103,7 @@ def test_corpus_report_is_paste_sized(corpus) -> None:
     # One terminal screen. The ANSWER SOURCES block earns its six lines: it is the
     # only way the operator can tell whether citation_evidence covers every answer,
     # and the alternative is an ad-hoc SQL round-trip across the air gap.
-    assert len(out.splitlines()) < 80, "doctor output must stay pasteable"
+    assert len(out.splitlines()) < 90, "doctor output must stay one screen"
     assert "canonical set          48" in out
 
 
@@ -153,3 +154,39 @@ def test_pii_schema_block_distinguishes_no_merchants_from_bad_json(
     empty = health_report(conn)
     assert "no parseable merchant raw_json to sample" not in empty
     assert "(no merchants)" in empty
+
+
+def test_label_candidates_report_fill_rate_and_coded_values(corpus) -> None:
+    """ "Mainly null" and "entirely null" are different answers; only a rate says which.
+
+    The operator flagged `se_not_good_seller_ind` as possibly-a-label but could not
+    tell whether every row is null. No `merchants` column names it, so without this
+    block it is invisible outside raw_json.
+    """
+    out = health_report(corpus.conn)
+    assert "LABEL CANDIDATES" in out
+    assert "se_not_good_seller_ind" in out
+    # Low-cardinality coded flags show their values; the rate is always present.
+    assert "non-null" in out and "distinct" in out
+
+
+def test_label_candidate_absent_from_schema_says_so(conn: sqlite3.Connection) -> None:
+    """0% and "the key does not exist" are different findings, per the module docstring."""
+    conn.execute(
+        "INSERT INTO merchants (se10, raw_json) VALUES (?, ?)",
+        ("1", json.dumps({"se10": "1", "se_toc_name": "Acme"})),
+    )
+    out = health_report(conn)
+    assert "not in the schema sample" in out
+
+
+def test_high_cardinality_label_values_are_not_printed(conn: sqlite3.Connection) -> None:
+    """A free-text reason field could carry merchant specifics; only the count leaves."""
+    for i in range(12):
+        conn.execute(
+            "INSERT INTO merchants (se10, raw_json) VALUES (?, ?)",
+            (str(i), json.dumps({"se10": str(i), "se_not_good_reason": f"case detail {i}"})),
+        )
+    out = health_report(conn)
+    assert "12 distinct" in out
+    assert "case detail 0" not in out

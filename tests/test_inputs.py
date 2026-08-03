@@ -35,8 +35,7 @@ MERCHANT = {
     "Significant_Owner_Postal_Code": "60000",
     "Business_Phone_No": "(555) 200-0000",
     "Seller_Email_Address": "contact@acmewidgets.example",
-    # Their spelling, missing the 't'. Do not "fix" it — see inputs.py.
-    "Primary_Auhorized_Signer_Name": "Pat Widgets",
+    "Primary_Authorized_Signer_Name": "Pat Widgets",
     "Authorized_Signer_Physical_Address": "300 Cedar Court",
     "Significant_Owner_Name": "Casey Acme",
     "website": "https://acmewidgets.example",

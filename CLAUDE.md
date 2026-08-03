@@ -282,7 +282,7 @@ corpus with 14 empty columns pass the whole suite.
 se10  se_toc_name  sell_dba_nm  sell_lgl_nm  sell_ctry_cd  sell_pstl_cd  state_name
 Seller_City_Name  Seller_Street_Address  Seller_Email_Address  Business_Phone_No
 Significant_Owner_Name  Significant_Owner_City_Name  Significant_Owner_Postal_Code
-Significant_Owner_Street_Address  Primary_Auhorized_Signer_Name
+Significant_Owner_Street_Address  Primary_Authorized_Signer_Name
 Authorized_Signer_Physical_Address  merchant_opening_date  merchant_sub_category
 wwic_industry_tagged  WWIC_Code  HRSE_tagged_merchant_ind  se_not_good_seller_ind
 se_not_good_reason  obligor_id  obligor_id_recency_indicator  rno  type_of_se  website
@@ -290,19 +290,26 @@ se_not_good_reason  obligor_id  obligor_id_recency_indicator  rno  type_of_se  w
 
 Three things to know about it:
 
-- **`Primary_Auhorized_Signer_Name` is missing a `t`.** That is how the schema spells it, so
-  that is how the parser reads it. "Correcting" it in either the parser or the fixture blanks
-  the column. If `coa doctor`'s per-column fill shows `signer_name` at 0% while its
-  neighbours are populated, the typo was a transcription slip and the constant is the fix.
+- **Spellings are the whole game.** A key that does not match produces a silent column of
+  NULLs, never an error. `Primary_Authorized_Signer_Name` first reached this repo as
+  `Primary_Auhorized_Signer_Name` (a hand-transcription slip across the air gap, corrected
+  2026-08-04) — one missing character would have blanked `signer_name` corpus-wide with no
+  symptom. `coa doctor`'s per-column fill is the check: a column at 0% while its neighbours
+  populate means the map is wrong, not that the data is empty.
 - **Four PII-bearing keys have no `merchants` column** and reach `pii_terms` only:
   `sell_dba_nm`, `sell_lgl_nm` (trade and legal names — a query is at least as likely to use
   these as `se_toc_name`), `sell_pstl_cd` (the SELLER postal code; only the owner's was
   mapped before), and `Authorized_Signer_Physical_Address` (a person's home address).
-- **`se_not_good_seller_ind` / `se_not_good_reason` look like ground-truth fraud labels**
-  — UNCONFIRMED, inferred from the names alone. The `labels(se10, label, source, ts)` table
-  was reserved for exactly this, and if the inference holds it upgrades the whole analysis
-  from "which questions carry no information" to "which questions predict the label". Worth
-  one question to the operator before anything is built on it.
+- **`se_not_good_seller_ind` / `se_not_good_reason` may be ground-truth fraud labels.**
+  **Meaning UNCONFIRMED — the operator does not know what the field means**, and reports it
+  as "mainly null" without being certain it is entirely null. That distinction is the whole
+  question: a label present on even a few percent of merchants upgrades the analysis from
+  "which questions carry no information" to "which questions predict the outcome", which is
+  a far stronger case for cutting one. `coa doctor`'s LABEL CANDIDATES block measures fill
+  rate and value distribution (values shown only for low-cardinality coded flags, so a
+  free-text reason field cannot leak merchant specifics). **Build nothing on it until both
+  the fill rate and the field's meaning are known** — a label whose semantics nobody can
+  state fails invariant 5 even if it is well populated.
 
 ### The decision lever is the question, not the query
 
