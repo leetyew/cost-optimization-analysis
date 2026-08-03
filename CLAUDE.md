@@ -242,7 +242,8 @@ Two consequences that are easy to get backwards:
 
 ## Stack
 
-- Python 3.13, stdlib `sqlite3` + `zipfile` + `re` + `csv`.
+- Python **3.10+** (the operator's analysis environment runs 3.12; the pin follows the
+  deployment, not an aspiration). Stdlib `sqlite3` + `zipfile` + `re` + `csv`.
 - Dependencies: `pyyaml`, `pytest`, `ruff`. **That is the whole list.** Adding one requires
   a stated trigger — see the reversal triggers in the plan; heavier options
   (rapidfuzz/sklearn/sentence-transformers, dnspython/whois, pandas/duckdb) were all
