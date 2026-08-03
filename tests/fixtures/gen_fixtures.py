@@ -531,7 +531,10 @@ def build_output_record(
         "se10": m["se10"],
         "n_runs": n_runs,
         "question": [[SYSTEM_PROMPT, user_prompt(questions)]],
-        "answers": answers,
+        # Real records use the singular `answer` (operator-confirmed 2026-08-03);
+        # PLAN.md §4 said `answers`. The generator follows reality, and
+        # outputs.ANSWER_KEYS still tolerates the other spelling.
+        "answer": answers,
         "answer_dict": {**answer_dict, "citation_evidence": citation_evidence},
         "voted_majority": voted_majority,
         "voted_final": voted_final,

@@ -239,6 +239,15 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         f"    records          {totals['out_records']} "
         f"({totals['out_dup_se10']} duplicate se10 both-kept, "
         f"{totals['out_bad_json']} unparseable line(s))",
+        "    answer key       "
+        + (
+            ", ".join(
+                f"{k} {totals[f'out_answers_key_{k}']}"
+                for k in ("answer", "answers")
+                if totals[f"out_answers_key_{k}"]
+            )
+            or f"NONE FOUND — {totals['out_no_answers']} record(s) yielded no answers"
+        ),
         f"    runs             {totals['out_runs']} "
         f"({totals['out_answer_blocks']} answer blocks, "
         f"{totals['out_answers_from_dict']} recovered from answer_dict)",

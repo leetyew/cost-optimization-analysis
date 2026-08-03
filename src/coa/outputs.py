@@ -71,6 +71,11 @@ CONVENIENCE_KEYS: dict[str, str] = {
 # Anomaly details are pasted into a chat session, so lists inside them are capped.
 MAX_LISTED = 12
 
+# The per-run answer map. `answer` is what real records use (operator-confirmed
+# 2026-08-03); `answers` is what PLAN.md §4 specified and the fixtures were built
+# to. Both are accepted and the one seen is counted — see `_find_answers`.
+ANSWER_KEYS: tuple[str, ...] = ("answer", "answers")
+
 
 @dataclass(frozen=True)
 class AnswerBlock:
@@ -98,6 +103,28 @@ class _Ctx:
     se10: str
     output_id: int
     stats: Counter
+
+
+def _find_answers(record: dict) -> tuple[dict, str | None, object]:
+    """Locate the per-run answer map, tolerating both observed spellings.
+
+    Real data uses `answer`; PLAN.md §4 specified `answers` and the fixtures were
+    built to it. Rather than swap one guess for another, both are accepted and the
+    winner is counted, so the ingest summary reports which spelling the corpus
+    actually uses instead of anyone having to remember.
+
+    Order matters: `answer` is checked first because it is the confirmed one.
+    Returns `(map, key_used, raw_value_seen)` — the raw value feeds the anomaly
+    detail when nothing usable is found.
+    """
+    raw: object = None
+    for key in ANSWER_KEYS:
+        value = record.get(key)
+        if isinstance(value, dict) and value:
+            return value, key, value
+        if value is not None and raw is None:
+            raw = value  # remember the first present-but-unusable value
+    return {}, None, raw
 
 
 def extract_questions(user_prompt: str) -> dict[int, str]:
@@ -309,8 +336,9 @@ def _ingest_record(
     ctx = _Ctx(conn, rec, src_name, line_no, se10, cur.lastrowid, stats)
     stats["out_records"] += 1
 
-    raw_answers = record.get("answers")
-    answers = raw_answers if isinstance(raw_answers, dict) else {}
+    answers, answers_key, raw_answers = _find_answers(record)
+    if answers_key:
+        stats[f"out_answers_key_{answers_key}"] += 1
     answer_dict = record.get("answer_dict")
     answer_dict = answer_dict if isinstance(answer_dict, dict) else {}
     if isinstance(n_runs, int) and n_runs != len(answers):
@@ -320,7 +348,7 @@ def _ingest_record(
     # nothing to the per-question rates that are the primary deliverable. Silently
     # storing the shell and moving on is exactly the failure this codebase keeps
     # hitting, so it speaks — and names the keys actually present, because the
-    # likely cause is `answers` being absent or under a different name.
+    # likely cause is the map living under a name ANSWER_KEYS does not list.
     if not answers:
         stats["out_no_answers"] += 1
         rec.record(
@@ -332,7 +360,7 @@ def _ingest_record(
             # can fire once per record. Printing it twice doubles the paste-back
             # payload for nothing, and that channel is the whole operator loop.
             detail=(
-                f"record has no usable `answers` map (found "
+                f"no usable answer map under any of {list(ANSWER_KEYS)} (found "
                 f"{type(raw_answers).__name__}"
                 + (f", {len(raw_answers)} entries" if isinstance(raw_answers, dict) else "")
                 + f"); top-level keys present: {_capped(sorted(record))}"

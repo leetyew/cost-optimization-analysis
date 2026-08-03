@@ -196,6 +196,7 @@ generator renders all of it; `src/coa/outputs.py` parses it.
 | Evidence is returned **only when the answer is ≤ 3**; otherwise NULL | confirmed |
 | Free-text questions (registered address, building type) return **`value \| NULL`** — a literal `NULL` is a first-class *answer*, not only an evidence state | confirmed |
 | The answer-format instruction is part of the **user prompt**, attached to the questions | confirmed |
+| The per-run answer map is keyed **`answer`** (singular), not `answers` as PLAN.md §4 said | confirmed — both spellings parsed, `answer key` in the ingest summary reports which was seen |
 | `logs/jsonl/*.jsonl` is the authoritative call source; `logs/*.log` is redundant except for timestamps | confirmed — action counts matched exactly |
 | A call's `queries` is a **fixed-length set of sub-queries within one call**, NOT cumulative session history | confirmed — length constant, members differ between consecutive calls |
 | Whether each `queries` entry bills as its own search | **UNRESOLVED, ~4x cost swing** — see "Cost model"; settle on the billing dashboard before publishing any figure |

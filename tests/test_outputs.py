@@ -466,3 +466,31 @@ def test_no_answers_anomaly_names_the_keys_that_were_present(
         "SELECT detail FROM anomalies WHERE code = 'OUTPUT_NO_ANSWERS'"
     ).fetchone()["detail"]
     assert "voted_majority" in detail and "answer_dict" in detail
+
+
+def test_singular_answer_key_is_the_real_one(conn: sqlite3.Connection) -> None:
+    """Real records use `answer`; PLAN.md §4 said `answers`. Both must work."""
+    rec = record()
+    rec["answer"] = rec.pop("answers", rec.get("answer"))
+    stats, recorder = run(conn, [rec])
+    assert stats["out_runs"] == 1
+    assert stats["out_answers_key_answer"] == 1
+    assert "OUTPUT_NO_ANSWERS" not in recorder.counts
+
+
+def test_plural_answers_key_still_parses(conn: sqlite3.Connection) -> None:
+    """The fixture spelling from PLAN.md must not regress into a silent zero."""
+    rec = record()
+    rec["answers"] = rec.pop("answer", rec.get("answers"))
+    stats, _ = run(conn, [rec])
+    assert stats["out_runs"] == 1
+    assert stats["out_answers_key_answers"] == 1
+
+
+def test_singular_wins_when_both_are_present(conn: sqlite3.Connection) -> None:
+    """Deterministic precedence, since `answer` is the confirmed spelling."""
+    rec = record()
+    rec["answer"] = {"run_0": "Q1. t\nA1. 4\n\nQ2. t\nA2. NULL"}
+    rec["answers"] = {"run_9": "Q1. t\nA1. 1\nEvidence. x"}
+    run(conn, [rec])
+    assert {a["run_id"] for a in rows(conn, "answers")} == {0}
