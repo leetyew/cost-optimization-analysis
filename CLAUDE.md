@@ -267,7 +267,8 @@ default-3 answers that carry no evidence. What remains unrendered is called out 
 | The `answer_dict` backstop rescued **1,047 whole runs** | confirmed — 50,256 dict-parsed answers = 1,047 x 48, i.e. runs where prose parsing yielded *nothing* and every answer came from the dict. Invariant 1 working as designed; worth diagnosing why their prose differs |
 | **50.5% of all answers are literally `NULL`** (1,223,141 of 2,420,160) | confirmed, and it is the headline candidate. Too large to be the free-text questions alone, so either far more questions are free-text than assumed, or scale questions also return NULL. P4's per-qnum split decides which |
 | 80 merchants appear in `input/` and `output/` but have **no logs** | confirmed — 19,349 vs 19,269. 0.4%; they have answers but no search calls, so they must be excluded from any per-merchant call or cost denominator |
-| **`pii_terms` was exactly 1.000 per merchant** (19,349 / 19,349) | **RESOLVED 2026-08-04.** Only `se_toc_name` matched; every other key was spelled differently. The real 29-key schema is now encoded in `MERCHANT_KEY_BY_COLUMN` and `PII_FIELDS` (see below) and rendered by `gen_fixtures.py`. The blast radius was wider than PII: `MERCHANT_KEYS` used the same spellings, so **14 of 15 `merchants` columns were NULL for all 19,349 merchants** — only `website` ever matched |
+| **`pii_terms` was exactly 1.000 per merchant** (19,349 / 19,349) | **RESOLVED and VERIFIED ON REAL DATA 2026-08-04.** Only `se_toc_name` matched; every other key was spelled differently. The real 29-key schema is encoded in `MERCHANT_KEY_BY_COLUMN` / `PII_FIELDS` and rendered by `gen_fixtures.py`. The blast radius was wider than PII: `MERCHANT_KEYS` used the same spellings, so **14 of 15 `merchants` columns were NULL for all 19,349 merchants** — only `website` ever matched. **The re-ingest confirms the fix: `merchant columns 15 of 15`, `PII_FIELDS missing none`, and 201,002 pii terms = 10.4 per merchant** (was 1.000). P3 templating is unblocked |
+| **`pii_terms` has NO `owner` field rows on real data** | **OPEN — the one loose end from the 2026-08-04 re-ingest.** `terms by field` returned six fields (email 52,740, name 45,748, zip 37,085, street 26,214, city 23,500, phone 15,715) and no `owner`, yet `PII_FIELDS["owner"]` = `Significant_Owner_Name` + `Primary_Authorized_Signer_Name`, both of which back `merchants` columns that `merchant columns 15 of 15` reports populated. `pii_terms_for` reads the same record keys, so a populated column with zero terms is self-contradictory. Most likely a typing drop when the line crossed the air gap (the breakdown is ordered by count DESC, so `owner` sorts last). If it is real, **owner and signer names go unmasked by P3 templating** — a privacy defect, not a metrics one |
 | Every search call has a singular `query` | confirmed — 592,710 billed `query_instances` rows = the search-call count exactly, and `CALL_FIELD_MISSING` is 0. Sub-queries are 1,805,026 = 3.05 per call, consistent with a constant `len(queries) == 4` minus the verbatim dedup |
 | The pasted DB **predates the `QUERY_REQUOTED` split** (commit `0402168`) | inferred — `QUERY_NOT_IN_QUERIES` still reads 17,231, the pre-split figure, and `QUERY_REQUOTED` is absent. Anomalies are written at ingest and `coa doctor` only reads them. `coa reparse` refreshes the parse but writes its rows under `stage='reparse'` while leaving the old `stage='weblogs'` rows in place, so the codes would then double-count in doctor's tally |
 
@@ -300,16 +301,43 @@ Three things to know about it:
   `sell_dba_nm`, `sell_lgl_nm` (trade and legal names — a query is at least as likely to use
   these as `se_toc_name`), `sell_pstl_cd` (the SELLER postal code; only the owner's was
   mapped before), and `Authorized_Signer_Physical_Address` (a person's home address).
-- **`se_not_good_seller_ind` / `se_not_good_reason` may be ground-truth fraud labels.**
-  **Meaning UNCONFIRMED — the operator does not know what the field means**, and reports it
-  as "mainly null" without being certain it is entirely null. That distinction is the whole
-  question: a label present on even a few percent of merchants upgrades the analysis from
-  "which questions carry no information" to "which questions predict the outcome", which is
-  a far stronger case for cutting one. `coa doctor`'s LABEL CANDIDATES block measures fill
-  rate and value distribution (values shown only for low-cardinality coded flags, so a
-  free-text reason field cannot leak merchant specifics). **Build nothing on it until both
-  the fill rate and the field's meaning are known** — a label whose semantics nobody can
-  state fails invariant 5 even if it is well populated.
+- **`se_not_good_seller_ind` / `se_not_good_reason` are NOT usable labels — the fields are
+  ENTIRELY empty.** **RESOLVED 2026-08-04**, and it closes the project's last direction-
+  changing question. All three label candidates measured **0 of 19,349 non-null, 0 distinct**:
+
+  ```
+  se_not_good_seller_ind    0 of 19,349 non-null (0.00%), 0 distinct
+  se_not_good_reason        0 of 19,349 non-null (0.00%), 0 distinct
+  HRSE_tagged_merchant_ind  0 of 19,349 non-null (0.00%), 0 distinct
+  ```
+
+  "Mainly null" was the operator's recollection; the corpus says *entirely* null. The
+  distinction was the whole question, and it resolved to the pessimistic side.
+
+  **The zero is trustworthy because of the output SHAPE, not the number.**
+  `_label_candidate_lines` prints `key absent from every merchant record` when the key never
+  appears, and the counted `0 of N non-null` form only when it does — tracked over every
+  record, not the 200-row schema sample. Getting the counted form therefore proves two
+  things at once: our key spellings match the real data (a misspelling would have printed
+  the absent message), and the keys exist in the input schema while **not one of the 19,349
+  merchants carries a non-null value**. Note the block does not establish that the keys are
+  present on *every* record — `label_seen` is a set, so a single occurrence sets it. What is
+  measured exactly is the non-null count, and that is 0; nothing here needs more.
+  This is the one case where 0% fill is **not** the silent-misspelling symptom that blanked
+  14 columns — the block was built to tell those two apart, and it did.
+
+  Consequences, all of them subtractive:
+
+  - **The analysis stays at "which questions carry no information."** It cannot become
+    "which questions predict the outcome" — there is no outcome column to predict. Do not
+    re-propose supervised question selection; it has no target variable.
+  - **Nobody needs to chase the field's meaning.** The semantics question is moot: a field
+    that is empty for 100% of merchants fails invariant 5 no matter what it would have meant.
+  - **The `labels` table in `db.py` is reserved for data that has been measured absent.**
+    It stays only because `CREATE TABLE IF NOT EXISTS` costs nothing; it is not pending work.
+  - `gen_fixtures.py` renders all three keys **present and null**, so the fixture reproduces
+    the real block byte-for-byte. It previously rendered `Y`/`N` at ~50% fill, i.e. a
+    ground-truth label the corpus does not have.
 
 ### The decision lever is the question, not the query
 

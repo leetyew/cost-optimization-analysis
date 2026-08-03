@@ -104,11 +104,14 @@ def build_merchants(rng: random.Random) -> list[dict]:
                 "Significant_Owner_Street_Address": f"{200 + i * 5} Elm Avenue",
                 "website": f"https://{domain}",
                 # "many more keys" — the parser must preserve what it does not name.
-                # These are the real ones; se_not_good_* look like ground-truth
-                # labels and are UNCONFIRMED as such — see CLAUDE.md.
-                "HRSE_tagged_merchant_ind": rng.choice(["Y", "N"]),
-                "se_not_good_seller_ind": rng.choice(["Y", "N"]),
-                "se_not_good_reason": rng.choice(["", "chargebacks", "identity"]),
+                # The three label candidates are in the input schema, and NOT ONE of
+                # 19,349 merchants carries a non-null value: measured 2026-08-04.
+                # Rendering them Y/N invented a ground-truth label the corpus lacks.
+                # Present-but-null is the shape under test — it is what separates
+                # "key absent" (a spelling bug) from "key empty" (a dead field).
+                "HRSE_tagged_merchant_ind": None,
+                "se_not_good_seller_ind": None,
+                "se_not_good_reason": None,
                 "WWIC_Code": f"{5000 + i}",
                 "obligor_id": f"OB{100000 + i}",
                 "obligor_id_recency_indicator": rng.choice([0, 1]),
