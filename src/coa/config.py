@@ -51,7 +51,14 @@ class Pricing:
     tiers: dict[str, TierRates] = field(default_factory=dict)
 
     def for_tier(self, tier: str | None) -> TierRates:
-        """Rates for one tier; empty rates when the tier is unknown or unset."""
+        """Rates for one tier.
+
+        A **missing** `service_tier` falls back to `standard`, because absent
+        means the request did not ask for a tier and standard is the API default
+        — an inference, so anything costing it must label the assumption. A tier
+        that is named but not configured gets empty rates instead, which reports
+        as unpriced rather than borrowing another tier's numbers.
+        """
         return self.tiers.get(tier or "standard", TierRates())
 
     @property

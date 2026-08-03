@@ -32,7 +32,9 @@ from .metrics import (
     cache_picture,
     open_page_overlap,
     render_cache_report,
+    render_cost_report,
     render_open_page_report,
+    tier_usage,
 )
 from .outputs import ingest_output
 from .weblogs import ingest_weblog, reparse
@@ -345,6 +347,8 @@ def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
         print(render_cache_report(cache_picture(conn)))
         print()
         print(render_open_page_report(open_page_overlap(conn)))
+        print()
+        print(render_cost_report(tier_usage(conn), cfg.pricing))
         return 0
     finally:
         conn.close()

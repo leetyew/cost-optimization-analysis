@@ -97,8 +97,25 @@ Only `action_type: search` is believed to carry the per-call fee; `open_page` an
 `find_in_page` consume tokens but no call fee. Also unverified.
 
 **`service_tier` is part of the pricing key**, not a detail: flex bills near batch rates and
-priority roughly 2x standard — a ~4x spread. `config.yaml` holds rates per tier, all null
-until an operator fills them from the billing dashboard.
+priority roughly 2x standard — a ~4x spread. `config.yaml` holds rates per tier.
+
+Filled so far (operator-supplied 2026-08-03, `standard` only):
+
+| | per 1M tokens |
+|---|---|
+| input | $2.50 |
+| cached input | $0.25 (1/10th — matches the published discount) |
+| output | $15.00 |
+| search calls | $10.00 per 1K |
+
+`flex` and `priority` stay null deliberately. Deriving them from published ratios would be
+inventing numbers, so their runs report as UNPRICED and are excluded from the total rather
+than borrowing standard's rates. A run with **no** `service_tier` is costed at standard, on
+the inference that absent means the API default was used — `coa analyze` labels that.
+
+`coa analyze` reports cost as a **range**, because the billing unit is unresolved: the low
+bound bills per visible call, the high bound per `queries` entry. The spread is the open
+question, not rate uncertainty.
 
 Two cost levers that need **no change to search behaviour at all**:
 

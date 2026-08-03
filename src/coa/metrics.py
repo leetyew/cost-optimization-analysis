@@ -11,6 +11,8 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
+from .config import Pricing, TierRates
+
 # OpenAI does not cache prompts below this, and there is no partial credit: under
 # the floor `cache_read` is exactly 0. A short static prefix is a dead lever, not
 # a weak one.
@@ -99,6 +101,172 @@ def cache_picture(conn: sqlite3.Connection) -> CachePicture:
         avg_prompt_chars=total_chars // n_prompts if n_prompts else 0,
         n_prompts=n_prompts,
     )
+
+
+@dataclass(frozen=True)
+class TierUsage:
+    """Measured volume for one service tier. Prices are applied separately."""
+
+    tier: str
+    n_runs: int
+    input_tokens: int
+    cache_read: int
+    output_tokens: int
+    n_search_calls: int
+    n_query_entries: int
+
+    def cost(self, rates: TierRates) -> float | None:
+        """Cost for this tier, or None when any rate it needs is unset.
+
+        The two subset rules live here and are the easiest thing in the project
+        to get wrong: `cache_read` is *inside* `input_tokens`, so full-rate input
+        is the difference, and `reasoning` is *inside* `output_tokens`, so it has
+        no term of its own. Adding either separately double-counts and inflates
+        the baseline — the worst direction to err in a document arguing someone
+        should spend less.
+
+        Uses the per-visible-call fee. `cost_per_query_billing` gives the other
+        bound while the billing unit is unresolved.
+        """
+        if any(
+            r is None
+            for r in (rates.input_per_mtok, rates.cached_input_per_mtok, rates.output_per_mtok)
+        ):
+            return None
+        full_rate_input = self.input_tokens - self.cache_read
+        return (
+            full_rate_input * rates.input_per_mtok / 1e6
+            + self.cache_read * rates.cached_input_per_mtok / 1e6
+            + self.output_tokens * rates.output_per_mtok / 1e6
+            + self.search_fee(rates, self.n_search_calls)
+        )
+
+    def search_fee(self, rates: TierRates, n_billed: int) -> float:
+        fee = rates.fee_per_1k_search_calls
+        return 0.0 if fee is None else n_billed * fee / 1000
+
+    def cost_per_query_billing(self, rates: TierRates) -> float | None:
+        """Same cost, but billing every `queries` entry as its own search.
+
+        OpenAI support describes the tool running several internal sub-searches
+        per prompt, each separately billable. Until the dashboard settles it,
+        both bounds get reported rather than one number that might be 4x wrong.
+        """
+        base = self.cost(rates)
+        if base is None:
+            return None
+        return (
+            base
+            - self.search_fee(rates, self.n_search_calls)
+            + self.search_fee(rates, self.n_query_entries)
+        )
+
+
+def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
+    """Token and call volume per service tier.
+
+    Search calls are counted per tier by joining through `runs`, because the fee
+    applies only to `action_type = 'search'` — open_page and find_in_page consume
+    tokens but carry no call fee.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            COALESCE(r.service_tier, '<unset>')                   AS tier,
+            COUNT(DISTINCT r.id)                                  AS n_runs,
+            COALESCE(SUM(r.input_tokens), 0)                      AS input_tokens,
+            COALESCE(SUM(r.cache_read), 0)                        AS cache_read,
+            COALESCE(SUM(r.output_tokens), 0)                     AS output_tokens
+        FROM runs r GROUP BY tier ORDER BY tier
+        """
+    ).fetchall()
+    calls = {
+        r["tier"]: (r["n_calls"], r["n_entries"])
+        for r in conn.execute(
+            """
+            SELECT
+                COALESCE(r.service_tier, '<unset>') AS tier,
+                COUNT(*)                            AS n_calls,
+                COALESCE(SUM(
+                    CASE WHEN c.queries_json IS NULL THEN 1
+                         ELSE json_array_length(c.queries_json) END
+                ), 0)                               AS n_entries
+            FROM search_calls c JOIN runs r ON r.id = c.run_pk
+            WHERE c.action_type = 'search'
+            GROUP BY tier
+            """
+        )
+    }
+    return [
+        TierUsage(
+            tier=r["tier"],
+            n_runs=r["n_runs"],
+            input_tokens=r["input_tokens"],
+            cache_read=r["cache_read"],
+            output_tokens=r["output_tokens"],
+            n_search_calls=calls.get(r["tier"], (0, 0))[0],
+            n_query_entries=calls.get(r["tier"], (0, 0))[1],
+        )
+        for r in rows
+    ]
+
+
+def render_cost_report(usage: list[TierUsage], pricing: Pricing) -> str:
+    """Cost per tier, with the unresolved billing unit shown as a range.
+
+    A tier whose rates are unset is reported as unpriced rather than folded in at
+    someone else's rate, and the banner names exactly what is missing.
+    """
+    if not usage:
+        return "COST\n  (no runs ingested)"
+
+    out = ["COST"]
+    if not pricing.is_verified:
+        out += [
+            "  *** UNVERIFIED PRICING ***",
+            f"  unset: {', '.join(pricing.missing())}",
+            "  Rates are operator-supplied, not reconciled against the billing",
+            "  dashboard. Relative shares below need no prices and are unaffected.",
+            "",
+        ]
+
+    low_total = high_total = 0.0
+    priced_all = True
+    for u in usage:
+        rates = pricing.for_tier(None if u.tier == "<unset>" else u.tier)
+        low, high = u.cost(rates), u.cost_per_query_billing(rates)
+        out.append(
+            f"  {u.tier:<10} {u.n_runs:>7,} runs  {u.n_search_calls:>9,} search calls  "
+            f"({u.n_query_entries:,} query entries)"
+        )
+        if low is None:
+            priced_all = False
+            out.append(f"  {'':<10} UNPRICED — no rates configured for this tier")
+            continue
+        low_total += low
+        high_total += high or low
+        out.append(
+            f"  {'':<10} ${low:,.2f} if billed per call   —   "
+            f"${high:,.2f} if billed per query entry"
+        )
+
+    if any(u.tier == "<unset>" for u in usage):
+        out.append(
+            "  `<unset>` runs carry no service_tier and are costed at STANDARD rates, "
+            "on the\n             assumption that absent means the API default was used. "
+            "That is an inference."
+        )
+
+    out += ["", f"  TOTAL      ${low_total:,.2f}  —  ${high_total:,.2f}"]
+    if high_total > low_total:
+        out.append(
+            f"  The {high_total / low_total:.1f}x spread is the unresolved billing unit, not "
+            f"uncertainty in the rates."
+        )
+        out.append("  Reconcile one day's charge against the dashboard to collapse it.")
+    if not priced_all:
+        out.append("  Total EXCLUDES tiers with no rates configured.")
+    return "\n".join(out)
 
 
 @dataclass(frozen=True)

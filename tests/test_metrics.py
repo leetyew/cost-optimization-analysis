@@ -7,13 +7,17 @@ from pathlib import Path
 
 import pytest
 
+from coa.config import Pricing, TierRates
 from coa.db import connect
 from coa.metrics import (
     CACHE_MIN_TOKENS,
+    TierUsage,
     cache_picture,
     open_page_overlap,
     render_cache_report,
+    render_cost_report,
     render_open_page_report,
+    tier_usage,
 )
 
 
@@ -155,3 +159,113 @@ def test_full_coverage_still_disclaims_search_attribution(conn: sqlite3.Connecti
 def test_no_citations_does_not_divide_by_zero(conn: sqlite3.Connection) -> None:
     assert open_page_overlap(conn).covered == 0.0
     assert "no citations ingested" in render_open_page_report(open_page_overlap(conn))
+
+
+# --- cost ------------------------------------------------------------------
+
+STANDARD = TierRates(
+    input_per_mtok=2.50,
+    cached_input_per_mtok=0.25,
+    output_per_mtok=15.00,
+    fee_per_1k_search_calls=10.00,
+)
+
+
+def usage(**over) -> TierUsage:
+    base = dict(
+        tier="standard",
+        n_runs=1,
+        input_tokens=1_000_000,
+        cache_read=0,
+        output_tokens=1_000_000,
+        n_search_calls=1000,
+        n_query_entries=4000,
+    )
+    return TierUsage(**{**base, **over})
+
+
+def test_cost_applies_each_rate_to_its_own_volume() -> None:
+    # 1M input @2.50 + 1M output @15.00 + 1000 calls @10/1k = 2.50 + 15.00 + 10.00
+    assert usage().cost(STANDARD) == pytest.approx(27.50)
+
+
+def test_cached_tokens_are_discounted_not_added() -> None:
+    """cache_read is INSIDE input_tokens: full-rate input is the difference.
+
+    Treating it as an addend would charge for 1.5M input tokens when only 1M were
+    used — inflating the baseline, which is the worst way to be wrong in a
+    document arguing another team should spend less.
+    """
+    all_cached = usage(cache_read=1_000_000)  # every input token cached
+    # 1M @0.25 + 1M output @15 + 10 fee = 0.25 + 15 + 10
+    assert all_cached.cost(STANDARD) == pytest.approx(25.25)
+    # and it must be strictly cheaper than the uncached case, never more
+    assert all_cached.cost(STANDARD) < usage().cost(STANDARD)
+
+
+def test_reasoning_has_no_term_of_its_own() -> None:
+    """reasoning is inside output_tokens, so cost depends only on output_tokens."""
+    assert usage(output_tokens=1_000_000).cost(STANDARD) == pytest.approx(27.50)
+
+
+def test_billing_unit_bounds_differ_only_by_the_search_fee() -> None:
+    u = usage()
+    low, high = u.cost(STANDARD), u.cost_per_query_billing(STANDARD)
+    assert high - low == pytest.approx((4000 - 1000) * 10.00 / 1000)  # 30.00
+
+
+def test_unpriced_tier_returns_none_rather_than_zero() -> None:
+    """A missing rate must not silently cost nothing."""
+    assert usage().cost(TierRates()) is None
+    assert usage().cost_per_query_billing(TierRates()) is None
+
+
+def test_report_excludes_unpriced_tiers_and_says_so(conn: sqlite3.Connection) -> None:
+    priced = Pricing(tiers={"standard": STANDARD})
+    out = render_cost_report([usage(), usage(tier="flex")], priced)
+    assert "UNPRICED" in out and "EXCLUDES" in out
+
+
+def test_report_shows_the_billing_spread(conn: sqlite3.Connection) -> None:
+    out = render_cost_report([usage()], Pricing(tiers={"standard": STANDARD}))
+    assert "unresolved billing unit" in out
+
+
+def test_tier_usage_counts_only_search_calls_for_the_fee(conn: sqlite3.Connection) -> None:
+    """open_page and find_in_page consume tokens but carry no per-call fee."""
+    conn.execute(
+        "INSERT INTO runs (id,se10,run_id,run_key,service_tier,input_tokens,"
+        "output_tokens,cache_read,src_file,src_line) "
+        "VALUES (1,'A',0,'run_0','standard',100,50,10,'f',1)"
+    )
+    for action, queries in (
+        ("search", '["a","b"]'),
+        ("open_page", None),
+        ("find_in_page", None),
+        ("search", '["c"]'),
+    ):
+        conn.execute(
+            "INSERT INTO search_calls (se10,run_pk,call_index,action_type,"
+            "queries_json,raw_json,parse_conf,src_file,src_line) "
+            "VALUES ('A',1,0,?,?,'{}','clean','f',1)",
+            (action, queries),
+        )
+    conn.commit()
+    (u,) = tier_usage(conn)
+    assert u.n_search_calls == 2  # not 4
+    assert u.n_query_entries == 3  # 2 + 1
+
+
+def test_unset_tier_is_costed_at_standard_but_labelled(conn: sqlite3.Connection) -> None:
+    """Absent service_tier means the API default was used, so standard is the right
+    inference — but it is an inference, and the report has to say so."""
+    priced = Pricing(tiers={"standard": STANDARD})
+    assert usage(tier="<unset>").cost(priced.for_tier(None)) is not None
+    out = render_cost_report([usage(tier="<unset>")], priced)
+    assert "costed at STANDARD rates" in out and "an inference" in out
+
+
+def test_named_but_unconfigured_tier_borrows_nothing() -> None:
+    """flex must not silently inherit standard's numbers."""
+    priced = Pricing(tiers={"standard": STANDARD, "flex": TierRates()})
+    assert usage(tier="flex").cost(priced.for_tier("flex")) is None

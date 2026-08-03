@@ -45,11 +45,30 @@ def test_config_loads_repo_yaml() -> None:
     assert cfg.anomalies.max_excerpt_chars == 2000
 
 
-def test_pricing_starts_unverified() -> None:
-    """Every price is null until an operator fills it, and the code must know it."""
+def test_partly_filled_pricing_is_still_unverified() -> None:
+    """One tier priced is not all tiers priced.
+
+    `standard` carries operator-supplied rates; `flex` and `priority` are
+    deliberately null rather than derived from published ratios. The banner must
+    keep firing while any tier is unpriced, or a run on an unpriced tier would be
+    silently valued at someone else's rate.
+    """
     cfg = Config.load(Path(__file__).parent.parent / "config.yaml")
     assert not cfg.pricing.is_verified
-    assert "standard.fee_per_1k_search_calls" in cfg.pricing.missing()
+    missing = cfg.pricing.missing()
+    assert not any(m.startswith("standard.") for m in missing)
+    assert "flex.input_per_mtok" in missing
+    assert "priority.output_per_mtok" in missing
+
+
+def test_standard_rates_load_with_the_cached_discount() -> None:
+    """Cached input is 1/10th of input — a cheap guard against a fat-fingered rate."""
+    rates = Config.load(Path(__file__).parent.parent / "config.yaml").pricing.for_tier("standard")
+    assert rates.input_per_mtok == 2.50
+    assert rates.cached_input_per_mtok == 0.25
+    assert rates.output_per_mtok == 15.00
+    assert rates.fee_per_1k_search_calls == 10.00
+    assert rates.cached_input_per_mtok == rates.input_per_mtok / 10
 
 
 def test_pricing_is_per_service_tier() -> None:
