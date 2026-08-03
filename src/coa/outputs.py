@@ -487,6 +487,18 @@ def _sync_questions(
 ) -> None:
     """Seed the canonical question set from the first record, then compare.
 
+    Drift is judged on the **qnum set**, not on the text. The 48 questions carry
+    merchant values inline (`...building at <zip>...`), so the text differs for
+    essentially every merchant — 19,349 of 19,350 records on the real corpus. That
+    is the expected shape of the data, not a defect, and firing an anomaly per
+    record buried every other code in the summary. What actually threatens the
+    per-question scorecard is a question appearing or disappearing, because that
+    is what makes qnum N mean two different things.
+
+    Text variation is still counted, since a jump in it would be worth knowing.
+    Telling merchant-value substitution from a genuine rewording needs the text
+    templated against `pii_terms`, which is P3's job and is not yet reliable.
+
     Cross-file state lives in the DB rather than in the parser so that resumable,
     per-file ingest stays correct — the parser itself never sees more than one file.
     """
@@ -502,24 +514,27 @@ def _sync_questions(
         return
 
     canonical = {r["qnum"]: r["text"] for r in rows}
-    if canonical == questions:
+    if any(canonical.get(q) != questions.get(q) for q in set(canonical) | set(questions)):
+        stats["out_question_text_varies"] += 1
+
+    missing = sorted(set(canonical) - set(questions))
+    added = sorted(set(questions) - set(canonical))
+    if not missing and not added:
         return
 
     stats["out_question_drift"] += 1
-    changed = sorted(
-        q for q in set(canonical) | set(questions) if canonical.get(q) != questions.get(q)
-    )
-    sample = changed[0]
     rec.record(
         "QUESTION_SET_DRIFT",
         se10=se10,
         src_file=src_name,
         src_line=line_no,
+        # Numbers only, no text: the question text carries merchant PII inline, and
+        # this detail is meant to be pasted into a chat session.
         detail=(
-            f"question set differs from the canonical one on {len(changed)} question(s): "
-            f"{_capped(changed)}. First difference, Q{sample}:\n"
-            f"  canonical: {(canonical.get(sample) or '<absent>')[:200]}\n"
-            f"  this one : {(questions.get(sample) or '<absent>')[:200]}"
+            f"question NUMBERS differ from the canonical set of {len(canonical)}: "
+            f"missing Q{_capped(missing) or '-'}, extra Q{_capped(added) or '-'}. "
+            "Per-question rates key on qnum, so a changed set means qnum N no "
+            "longer denotes one question across the corpus."
         ),
     )
 

@@ -144,6 +144,25 @@ def health_report(conn: sqlite3.Connection) -> str:
             )
         )
 
+    # Settles whether PROSE_CITATION_RE is too strict without moving any evidence
+    # text across the air gap. The regex requires the markdown link to be wrapped
+    # in its own parens -- `([t](u))`. If `any link` greatly exceeds `paren-wrapped`
+    # the bare `[t](u)` form is being dropped, and the prose-vs-dict gap is our bug
+    # rather than a finding about their post-processing.
+    if n_a:
+        links = conn.execute(
+            "SELECT COUNT(*) a, SUM(evidence_text LIKE '%([%](%') w FROM answers "
+            "WHERE evidence_text LIKE '%](%'"
+        ).fetchone()
+        any_link, wrapped = links["a"] or 0, links["w"] or 0
+        out.append(
+            _line(
+                "evidence md links",
+                f"{any_link:,} answers contain one; {wrapped:,} paren-wrapped, "
+                f"{any_link - wrapped:,} bare",
+            )
+        )
+
     out += ["", "CITATIONS / VOTES"]
     out.append(
         _breakdown(

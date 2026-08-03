@@ -344,16 +344,32 @@ def test_duplicate_se10_keeps_both_and_flags_both(conn: sqlite3.Connection) -> N
     assert [r["dup_flag"] for r in rows(conn, "output_records")] == [1, 1]
 
 
-def test_question_set_drift_is_detected_against_the_canonical_set(
+def test_drift_fires_on_a_changed_qnum_set_not_on_changed_text(
     conn: sqlite3.Connection,
 ) -> None:
-    drifted = record(
+    """Question text differs per merchant — values are inlined — so only a
+    changed qnum set threatens the per-question denominator.
+
+    Keying on text fired on 19,349 of 19,350 real records and buried every other
+    anomaly code in the summary.
+    """
+    reworded = record(
         se10="1000000002",
-        questions=[[SYSTEM, prompt("Is it legitimate?", "Has it changed its legal name?")]],
+        questions=[[SYSTEM, prompt("Is it legitimate?", "What is the address at 90210?")]],
     )
-    _, recorder = run(conn, [record(), drifted])
+    stats, recorder = run(conn, [record(), reworded])
+    assert "QUESTION_SET_DRIFT" not in recorder.counts
+    assert stats["out_question_text_varies"] == 1
+
+    dropped = record(se10="1000000003", questions=[[SYSTEM, prompt("Is it legitimate?")]])
+    _, recorder = run(conn, [dropped])
     assert recorder.counts["QUESTION_SET_DRIFT"] == 1
-    assert conn.execute("SELECT COUNT(*) AS n FROM questions").fetchone()["n"] == 2
+    detail = conn.execute(
+        "SELECT detail FROM anomalies WHERE code = 'QUESTION_SET_DRIFT'"
+    ).fetchone()["detail"]
+    assert "missing Q2" in detail
+    # Numbers only: question text carries merchant PII and this gets pasted into chat.
+    assert "address" not in detail
 
 
 def test_convenience_key_conflict_reports_and_never_overwrites_input(

@@ -222,7 +222,7 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         f"    calls            {calls}"
         + (f"  ({calls / totals['wl_runs']:.1f} per run)" if totals["wl_runs"] else ""),
         f"      search         {billed}"
-        + (f"  ({billed / calls:.1%}, the only billed action)" if calls else ""),
+        + (f"  ({billed / calls:.1%} of billed calls)" if calls else ""),
         f"      open_page      {totals['wl_action_open_page']}",
         f"      find_in_page   {totals['wl_action_find_in_page']}",
         f"    parse_conf       clean {totals['wl_conf_clean']}, "
@@ -253,6 +253,11 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         f"{totals['out_answers_from_dict']} recovered from answer_dict)",
         f"    short runs       {totals['out_short_runs']} "
         f"(fewer answer blocks than the canonical question set)",
+        # Expected to be ~every record: the questions carry merchant values inline.
+        # Reported as a rate rather than an anomaly for exactly that reason.
+        f"    question text    {totals['out_question_text_varies']} record(s) differ from the "
+        f"canonical text\n                     (expected — merchant values are inline; "
+        f"only a changed qnum SET is an anomaly)",
         f"    answer/dict      {totals['out_answer_disagreements']} answer(s) differ "
         f"from answer_dict",
         f"    citations        {totals['out_prose_citations']} prose + "

@@ -208,16 +208,18 @@ def test_reasoning_has_no_term_of_its_own() -> None:
     assert usage(output_tokens=1_000_000).cost(STANDARD) == pytest.approx(27.50)
 
 
-def test_billing_unit_bounds_differ_only_by_the_search_fee() -> None:
-    u = usage()
-    low, high = u.cost(STANDARD), u.cost_per_query_billing(STANDARD)
-    assert high - low == pytest.approx((4000 - 1000) * 10.00 / 1000)  # 30.00
+def test_sub_queries_do_not_affect_cost() -> None:
+    """Billing is per visible call; `queries` entries are volume, never money.
+
+    Settled against the dashboard: $6,946.95 == 694,695 calls x $10/1K. Reading
+    the sub-queries as billable would have inflated the corpus by ~3.4x.
+    """
+    assert usage(n_query_entries=4000).cost(STANDARD) == usage(n_query_entries=1).cost(STANDARD)
 
 
 def test_unpriced_tier_returns_none_rather_than_zero() -> None:
     """A missing rate must not silently cost nothing."""
     assert usage().cost(TierRates()) is None
-    assert usage().cost_per_query_billing(TierRates()) is None
 
 
 def test_report_excludes_unpriced_tiers_and_says_so(conn: sqlite3.Connection) -> None:
@@ -226,13 +228,22 @@ def test_report_excludes_unpriced_tiers_and_says_so(conn: sqlite3.Connection) ->
     assert "UNPRICED" in out and "EXCLUDES" in out
 
 
-def test_report_shows_the_billing_spread(conn: sqlite3.Connection) -> None:
+def test_report_states_the_settled_billing_unit_without_a_range(
+    conn: sqlite3.Connection,
+) -> None:
+    """The low—high range straddled an open question that the dashboard closed."""
     out = render_cost_report([usage()], Pricing(tiers={"standard": STANDARD}))
-    assert "unresolved billing unit" in out
+    assert "ALL action types" in out
+    assert "if billed per" not in out
 
 
-def test_tier_usage_counts_only_search_calls_for_the_fee(conn: sqlite3.Connection) -> None:
-    """open_page and find_in_page consume tokens but carry no per-call fee."""
+def test_tier_usage_bills_every_action_type(conn: sqlite3.Connection) -> None:
+    """open_page and find_in_page are billed exactly like search.
+
+    Settled against the dashboard: $6,946.95 == 694,695 calls at $10/1K, and
+    694,695 is the total across all three action types. Counting only `search`
+    (592,710) understated the corpus fee by $1,019.85 — 17.2%.
+    """
     conn.execute(
         "INSERT INTO runs (id,se10,run_id,run_key,service_tier,input_tokens,"
         "output_tokens,cache_read,src_file,src_line) "
@@ -252,8 +263,9 @@ def test_tier_usage_counts_only_search_calls_for_the_fee(conn: sqlite3.Connectio
         )
     conn.commit()
     (u,) = tier_usage(conn)
-    assert u.n_search_calls == 2  # not 4
-    assert u.n_query_entries == 3  # 2 + 1
+    assert u.n_search_calls == 4  # every action type, not just the 2 searches
+    # open_page/find_in_page carry no `queries`, so they floor at one entry each.
+    assert u.n_query_entries == 5  # 2 + 1 + 1 + 1
 
 
 def test_unset_tier_is_costed_at_standard_but_labelled(conn: sqlite3.Connection) -> None:
@@ -291,8 +303,8 @@ def test_call_with_no_run_is_still_billed(conn: sqlite3.Connection) -> None:
     assert by_tier["<unset>"].n_search_calls == 1  # orphan bucketed, not dropped
 
 
-def test_empty_queries_array_still_bills_once(conn: sqlite3.Connection) -> None:
-    """Otherwise the per-entry bound could fall below the per-call bound."""
+def test_empty_queries_array_still_counts_one_entry(conn: sqlite3.Connection) -> None:
+    """Reported volume must never fall below the billed call count."""
     conn.execute(
         "INSERT INTO runs (id,se10,run_id,run_key,service_tier,input_tokens,"
         "output_tokens,cache_read,src_file,src_line) "
@@ -306,4 +318,3 @@ def test_empty_queries_array_still_bills_once(conn: sqlite3.Connection) -> None:
     conn.commit()
     (u,) = tier_usage(conn)
     assert (u.n_search_calls, u.n_query_entries) == (1, 1)
-    assert u.cost_per_query_billing(STANDARD) >= u.cost(STANDARD)

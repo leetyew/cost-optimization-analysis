@@ -140,13 +140,26 @@ def question_kinds() -> list[str]:
     return [QUESTION_SPECS[i % len(QUESTION_SPECS)][1] for i in range(N_QUESTIONS)]
 
 
-def build_questions() -> list[str]:
-    """The fixed 48-question prompt, stable across records except where drift is planted."""
+def build_questions(m: dict) -> list[str]:
+    """The 48-question prompt for one merchant.
+
+    The question NUMBERS are fixed; the TEXT is not. Real questions carry merchant
+    values inline (`...building at <zip>...`), so 19,349 of 19,350 real records
+    differ from the canonical text. Rendering identical questions for every
+    merchant is what let a text-equality drift check look correct here and then
+    fire once per record in production. It is also why cross-merchant prompt
+    caching is structurally impossible — the first inlined value ends the shared
+    prefix.
+    """
     out = []
     for i in range(N_QUESTIONS):
         stem, kind = QUESTION_SPECS[i % len(QUESTION_SPECS)]
         instruction = SCALE_INSTRUCTION if kind == "scale" else TEXT_INSTRUCTION
-        out.append(f"{stem} (variant {i // len(QUESTION_SPECS) + 1})?\n{instruction}")
+        # One inlined merchant value per text question, exactly as the real prompt
+        # does. `owner_postal` is also a pii_terms entry, so P3's templating has
+        # something real to bite on when it masks question text for the report.
+        where = f" at {m['owner_postal']}" if kind == "text" else ""
+        out.append(f"{stem}{where} (variant {i // len(QUESTION_SPECS) + 1})?\n{instruction}")
     return out
 
 
@@ -194,7 +207,11 @@ def queries_for(m: dict, rng: random.Random) -> list[str]:
 # Web-search logs (logs/jsonl/*.jsonl)
 # ---------------------------------------------------------------------------
 
-SERVICE_TIERS = ["standard", "flex", "priority"]
+# `default` is the API's own name for the standard tier and is what 100% of the
+# real corpus reports; the other three are kept so the unpriced-tier path stays
+# covered. Omitting `default` here is what let config.yaml ship without it, which
+# would have costed every real run as UNPRICED and totalled $0.00.
+SERVICE_TIERS = ["default", "standard", "flex", "priority"]
 
 
 def build_web_search_calls(m: dict, rng: random.Random, n_searches: int) -> list[dict]:
@@ -579,7 +596,6 @@ def write_fixtures() -> dict:
     """Generate the whole tree and return the golden counts."""
     rng = random.Random(SEED)
     merchants = build_merchants(rng)
-    questions = build_questions()
     kinds = question_kinds()
 
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -654,7 +670,9 @@ def write_fixtures() -> dict:
     out_tally: Counter[str] = Counter()
 
     def _record(m: dict, **kw) -> dict:
-        rec, tally = build_output_record(m, questions, kinds, out_rng, **kw)
+        # Per-merchant questions, so the corpus reproduces the real shape: same 48
+        # numbers, text that differs wherever a merchant value is inlined.
+        rec, tally = build_output_record(m, build_questions(m), kinds, out_rng, **kw)
         out_tally.update(tally)
         return rec
 
@@ -670,9 +688,13 @@ def write_fixtures() -> dict:
     # a second record, which both makes dup_output_se10 wrong and lets the
     # "keep the record with most runs" rule discard the drifted copy, so the
     # QUESTION_SET_DRIFT hazard would never fire.
-    drifted = list(questions)
-    drifted[7] = "Has the merchant changed its legal name recently?\n" + TEXT_INSTRUCTION
+    #
+    # A question is DROPPED rather than reworded. Rewording changes only the text,
+    # which every record now does anyway via inlined merchant values; the anomaly
+    # keys on the qnum set, because that is what makes qnum N stop denoting one
+    # question across the corpus.
     drift_rec = next(r for r in records_b if r["se10"] == merchants[19]["se10"])
+    drifted = build_questions(merchants[19])[:-1]
     drift_rec["questions"] = [[SYSTEM_PROMPT, user_prompt(drifted)]]
 
     # Duplicate se10 across output files, with differing run counts so the
@@ -769,7 +791,7 @@ if __name__ == "__main__":
     print(f"  merchants        {g['n_merchants']}")
     w = g["weblogs"]
     print(f"  weblog runs      {w['runs']} ({w['calls']} calls)")
-    print(f"    search         {w['action_search']}  <- the only billed action")
+    print(f"    search         {w['action_search']}  (all action types are billed)")
     print(f"    open_page      {w['action_open_page']}, find_in_page {w['action_find_in_page']}")
     print(f"  output records   {g['outputs']['n_records']}")
     o = g["outputs"]

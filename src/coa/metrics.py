@@ -125,8 +125,9 @@ class TierUsage:
         the baseline — the worst direction to err in a document arguing someone
         should spend less.
 
-        Uses the per-visible-call fee. `cost_per_query_billing` gives the other
-        bound while the billing unit is unresolved.
+        The call fee is per visible call across every action type, settled
+        against the dashboard — see `tier_usage`. `n_query_entries` is reported
+        alongside as volume, never as cost: sub-queries are not billed.
         """
         if any(
             r is None
@@ -145,29 +146,14 @@ class TierUsage:
         fee = rates.fee_per_1k_search_calls
         return 0.0 if fee is None else n_billed * fee / 1000
 
-    def cost_per_query_billing(self, rates: TierRates) -> float | None:
-        """Same cost, but billing every `queries` entry as its own search.
-
-        OpenAI support describes the tool running several internal sub-searches
-        per prompt, each separately billable. Until the dashboard settles it,
-        both bounds get reported rather than one number that might be 4x wrong.
-        """
-        base = self.cost(rates)
-        if base is None:
-            return None
-        return (
-            base
-            - self.search_fee(rates, self.n_search_calls)
-            + self.search_fee(rates, self.n_query_entries)
-        )
-
 
 def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
     """Token and call volume per service tier.
 
-    Search calls are counted per tier through `runs`, because the fee applies only
-    to `action_type = 'search'` — open_page and find_in_page consume tokens but
-    carry no call fee.
+    **Every action type is billed**, not just `search`. Settled 2026-08-03 against
+    the dashboard: the $6,946.95 charge is exactly 694,695 calls at $10/1K, and
+    694,695 is the total across search + open_page + find_in_page. Filtering to
+    `search` here understated the fee by 101,985 calls — $1,019.85, or 17.2%.
 
     Two things this must not do, both of which silently *understate* cost:
 
@@ -176,8 +162,7 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
       are bucketed under `<unset>` instead, and the tier list is the union of both
       sides so a tier with calls but no runs still appears.
     * **Let an empty `queries` array count as zero billed searches.** A call bills
-      at least once under either billing unit, so the per-entry count floors at 1;
-      without that the high bound could fall below the low one.
+      at least once, so the per-entry count floors at 1.
     """
     runs = {
         r["tier"]: r
@@ -205,7 +190,6 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
                          ELSE MAX(1, json_array_length(c.queries_json)) END
                 ), 0)                               AS n_entries
             FROM search_calls c LEFT JOIN runs r ON r.id = c.run_pk
-            WHERE c.action_type = 'search'
             GROUP BY tier
             """
         )
@@ -225,7 +209,11 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
 
 
 def render_cost_report(usage: list[TierUsage], pricing: Pricing) -> str:
-    """Cost per tier, with the unresolved billing unit shown as a range.
+    """Cost per tier, as a single figure per the settled billing unit.
+
+    This used to print a low—high range straddling "billed per call" versus
+    "billed per `queries` entry". The dashboard reconciliation collapsed that,
+    so a range here would now overstate the uncertainty that remains.
 
     A tier whose rates are unset is reported as unpriced rather than folded in at
     someone else's rate, and the banner names exactly what is missing.
@@ -238,32 +226,26 @@ def render_cost_report(usage: list[TierUsage], pricing: Pricing) -> str:
         out += [
             "  *** UNVERIFIED PRICING ***",
             f"  unset: {', '.join(pricing.missing())}",
-            "  Rates are operator-supplied, not reconciled against the billing",
-            "  dashboard. Relative shares below need no prices and are unaffected.",
+            "  Rates are operator-supplied. Relative shares below need no prices",
+            "  and are unaffected.",
             "",
         ]
 
-    low_total = high_total = 0.0
+    total = 0.0
     priced_all = True
     for u in usage:
         rates = pricing.for_tier(None if u.tier == "<unset>" else u.tier)
-        low, high = u.cost(rates), u.cost_per_query_billing(rates)
+        cost = u.cost(rates)
         out.append(
-            f"  {u.tier:<10} {u.n_runs:>7,} runs  {u.n_search_calls:>9,} search calls  "
-            f"({u.n_query_entries:,} query entries)"
+            f"  {u.tier:<10} {u.n_runs:>7,} runs  {u.n_search_calls:>9,} billed calls  "
+            f"({u.n_query_entries:,} query entries, not billed)"
         )
-        if low is None:
+        if cost is None:
             priced_all = False
             out.append(f"  {'':<10} UNPRICED — no rates configured for this tier")
             continue
-        low_total += low
-        # Explicit None test: a legitimate cost of exactly 0.0 is falsy, and `or`
-        # would silently substitute the low bound for it.
-        high_total += low if high is None else high
-        out.append(
-            f"  {'':<10} ${low:,.2f} if billed per call   —   "
-            f"${high:,.2f} if billed per query entry"
-        )
+        total += cost
+        out.append(f"  {'':<10} ${cost:,.2f}")
 
     if any(u.tier == "<unset>" for u in usage):
         out.append(
@@ -272,13 +254,12 @@ def render_cost_report(usage: list[TierUsage], pricing: Pricing) -> str:
             "That is an inference."
         )
 
-    out += ["", f"  TOTAL      ${low_total:,.2f}  —  ${high_total:,.2f}"]
-    if high_total > low_total:
-        out.append(
-            f"  The {high_total / low_total:.1f}x spread is the unresolved billing unit, not "
-            f"uncertainty in the rates."
-        )
-        out.append("  Reconcile one day's charge against the dashboard to collapse it.")
+    out += ["", f"  TOTAL      ${total:,.2f}"]
+    out.append(
+        "  Billed per visible call across ALL action types (search, open_page,"
+        "\n  find_in_page), reconciled against the dashboard charge. Sub-queries"
+        "\n  inside a call are not billed."
+    )
     if not priced_all:
         out.append("  Total EXCLUDES tiers with no rates configured.")
     return "\n".join(out)

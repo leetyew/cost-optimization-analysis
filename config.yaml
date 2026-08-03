@@ -27,8 +27,11 @@ paths:
 # output_tokens (verified: input + output == total across the corpus, and
 # confirmed in OpenAI's docs). Adding either as its own term double-counts.
 #
-# Only `action_type: search` is believed to carry the per-call fee; open_page
-# and find_in_page consume tokens but no call fee. VERIFY on the dashboard.
+# EVERY action type carries the per-call fee -- search, open_page and
+# find_in_page alike. Settled 2026-08-03 against the billing dashboard: the
+# charge was $6,946.95, which is exactly 694,695 calls at $10/1K, and 694,695 is
+# the total call count across all three types. Billing only `search` (592,710)
+# understates the fee by $1,019.85, or 17.2%.
 #
 # A tier left null cannot be costed: its runs are reported as unpriced rather
 # than silently valued at another tier's rate.
@@ -36,6 +39,16 @@ pricing:
   # Operator-supplied 2026-08-03. The cached-input rate is exactly 1/10th of
   # input, which matches the published discount and is a useful sanity check.
   standard:
+    input_per_mtok: 2.50
+    cached_input_per_mtok: 0.25
+    output_per_mtok: 15.00
+    fee_per_1k_search_calls: 10.00
+  # `default` is what the API reports for the standard tier, and it is what 100%
+  # of the real corpus carries. Without this every run costs as UNPRICED and the
+  # total comes out $0.00. Same rates as `standard` deliberately: the $6,946.95
+  # reconciliation was measured on this corpus, i.e. on `default` runs, so this
+  # is the tier those rates were actually verified against.
+  default:
     input_per_mtok: 2.50
     cached_input_per_mtok: 0.25
     output_per_mtok: 15.00
