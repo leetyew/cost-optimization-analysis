@@ -385,19 +385,38 @@ they change the deliverable.
 
 ### 1. The drop-candidate head is steep — four questions are close to inert
 
-Top of `DROP CANDIDATES`, over 50,420 question-runs each:
+The full `DROP CANDIDATES` top 10, over 50,420 question-runs each. **Every one is `mixed`**
+— no pure-`scale` question ranks, which is itself a finding:
 
-| Q | noinfo | cited | kind |
+| Q | noinfo | cited | tier |
 |---|---|---|---|
-| 22 | **91.6%** | 1.1% | mixed |
-| 9 | 82.7% | 2.9% | mixed |
-| 13 | 81.9% | 4.8% | mixed |
-| 36 | 77.5% | 5.1% | mixed |
+| 22 | **91.6%** | 1.1% | inert |
+| 9 | 82.7% | 2.9% | inert |
+| 13 | 81.9% | 4.8% | inert |
+| 36 | 77.5% | 5.1% | inert |
+| 30 | 75.3% | 14.1% | low-yield |
+| 37 | 73.2% | 15.3% | low-yield |
+| 35 | 72.9% | 23.6% | low-yield |
+| 29 | 72.8% | 22.3% | low-yield |
+| 16 | 70.4% | 25.6% | low-yield |
+| 17 | 69.7% | 17.5% | low-yield |
 
 Q22 carried no information in ~46,185 of 50,420 runs and produced a citation in ~555.
-A steep head was the good case: it means individual questions are droppable and the
-report can name them, rather than the flat distribution that would have forced the
-weaker consolidation-only argument.
+
+**Rank by `noinfo`, but CUT by `cited`.** `noinfo` decays smoothly across the ten
+(91.6 -> 69.7) and offers no natural cut point. The citation rate does: it sits at
+1.1-5.1% for the top four and then jumps to 14.1% at Q30 — a ~3x discontinuity between
+adjacent ranks. That splits the list into two tiers that deserve different recommendations:
+
+- **Inert (22, 9, 13, 36)** — almost never answers, almost never surfaces a source. The
+  deletion case.
+- **Low-yield (30, 37, 35, 29, 16, 17)** — answers nothing ~70% of the time but still
+  cites a source in a fifth to a quarter of runs. These are *functioning* questions with
+  poor hit rates; recommending deletion on the `noinfo` rank alone would overreach.
+
+A steep head was the good case: individual questions are droppable and the report can name
+them, rather than the flat distribution that would have forced the weaker
+consolidation-only argument.
 
 ### 2. `default-3` contributes essentially nothing — `noinfo` IS the NULL rate
 
@@ -442,7 +461,20 @@ A near-zero citation rate does **not** settle it: searching and finding nothing 
 what produces a NULL answer with no citation. The pessimistic reading is at least as
 consistent with the data as the optimistic one.
 
-**P3 is the bridge, and it is now unblocked.** PII-templated query archetypes are
+**One savings component needs NO attribution at all.** Every run pays input tokens for all
+48 question texts whether or not a question yields anything, so deleting a question removes
+its text from the prompt deterministically. `canonical set 48` on the real corpus (confirmed
+2026-08-04, after the `questions`-plural key fix) means the question text is finally in the
+`questions` table, so each question's share of the user prompt is measurable. Multiply that
+share by the measured `input_tokens` and the input saving is exact up to the char->token
+proxy — which must be labelled, or `tiktoken` justified as a dependency under the stack rule.
+
+Two cautions on that figure: the **output** saving is much smaller than it looks, because an
+inert question's answer block is `NULL / Evidence. NULL` — a handful of tokens, not a
+paragraph. And input tokens are ~57% of cost with the search fee at 42.9%, so the
+no-attribution floor is real but is not the headline.
+
+**P3 is the bridge for the rest, and it is now unblocked.** PII-templated query archetypes are
 human-readable (`"what type of building is at <ZIP>"`), so an archetype maps to a question
 by inspection even though the corpus carries no explicit link. That converts "Q22 is inert"
 into "Q22 costs N searches", which is the claim the report actually needs. Label the
