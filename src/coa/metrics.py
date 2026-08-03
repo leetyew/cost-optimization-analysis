@@ -161,8 +161,10 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
       call vanishing from a cost report is the wrong direction to be wrong. They
       are bucketed under `<unset>` instead, and the tier list is the union of both
       sides so a tier with calls but no runs still appears.
-    * **Let an empty `queries` array count as zero billed searches.** A call bills
-      at least once, so the per-entry count floors at 1.
+    * **Invent query entries for calls that have none.** `n_query_entries` is now
+      display-only volume, so it counts `query_instances` rows directly. Flooring
+      each call at 1 was needed only while it drove the upper cost bound; with
+      that gone it credits every `open_page` with a query it never issued.
     """
     runs = {
         r["tier"]: r
@@ -186,8 +188,8 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
                 COALESCE(r.service_tier, '<unset>') AS tier,
                 COUNT(*)                            AS n_calls,
                 COALESCE(SUM(
-                    CASE WHEN c.queries_json IS NULL THEN 1
-                         ELSE MAX(1, json_array_length(c.queries_json)) END
+                    (SELECT COUNT(*) FROM query_instances q
+                     WHERE q.search_call_id = c.id)
                 ), 0)                               AS n_entries
             FROM search_calls c LEFT JOIN runs r ON r.id = c.run_pk
             GROUP BY tier

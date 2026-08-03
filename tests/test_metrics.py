@@ -262,10 +262,18 @@ def test_tier_usage_bills_every_action_type(conn: sqlite3.Connection) -> None:
             (action, queries),
         )
     conn.commit()
+    for call_id, texts in ((1, ["a", "b"]), (4, ["c"])):
+        conn.executemany(
+            "INSERT INTO query_instances (search_call_id, se10, query_text, is_billed_query) "
+            "VALUES (?, 'A', ?, 0)",
+            [(call_id, t) for t in texts],
+        )
+    conn.commit()
     (u,) = tier_usage(conn)
     assert u.n_search_calls == 4  # every action type, not just the 2 searches
-    # open_page/find_in_page carry no `queries`, so they floor at one entry each.
-    assert u.n_query_entries == 5  # 2 + 1 + 1 + 1
+    # Volume comes from query_instances, so open_page/find_in_page contribute
+    # nothing rather than being credited with a query they never issued.
+    assert u.n_query_entries == 3
 
 
 def test_unset_tier_is_costed_at_standard_but_labelled(conn: sqlite3.Connection) -> None:
@@ -303,8 +311,8 @@ def test_call_with_no_run_is_still_billed(conn: sqlite3.Connection) -> None:
     assert by_tier["<unset>"].n_search_calls == 1  # orphan bucketed, not dropped
 
 
-def test_empty_queries_array_still_counts_one_entry(conn: sqlite3.Connection) -> None:
-    """Reported volume must never fall below the billed call count."""
+def test_a_call_with_no_queries_is_still_billed(conn: sqlite3.Connection) -> None:
+    """The fee is per call, so an empty `queries` array must not zero the charge."""
     conn.execute(
         "INSERT INTO runs (id,se10,run_id,run_key,service_tier,input_tokens,"
         "output_tokens,cache_read,src_file,src_line) "
@@ -317,4 +325,5 @@ def test_empty_queries_array_still_counts_one_entry(conn: sqlite3.Connection) ->
     )
     conn.commit()
     (u,) = tier_usage(conn)
-    assert (u.n_search_calls, u.n_query_entries) == (1, 1)
+    assert (u.n_search_calls, u.n_query_entries) == (1, 0)
+    assert u.cost(STANDARD) == pytest.approx(10.00 / 1000)
