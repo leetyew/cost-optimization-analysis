@@ -36,11 +36,14 @@ from .outputs import _norm_text, is_null_answer
 #
 # All three sources are stored side by side at ingest (see db.py's `answers`
 # comment), so switching between them is a SQL clause rather than a re-parse of a
-# 19k-merchant corpus. That matters: whose parse is authoritative is genuinely
-# open. Their pipeline recovered 1,047 whole runs our regex could not read at all,
-# which is direct evidence their block parsing is better than ours — but "better
-# on the runs we failed" does not establish "better everywhere", and this flag is
-# how that gets measured instead of assumed.
+# 19k-merchant corpus.
+#
+# Measured 2026-08-04, and it demotes this flag from load-bearing to marginal:
+# `citation_evidence` is co-derived with the prose, not an independent parse of
+# it. It covers exactly the runs whose prose parsed and nothing else, and where
+# both exist they agree with us on 98.6% of answers. `answer_dict` is the genuinely
+# independent one — it differs on 6.0% and is the SOLE source for 50,256 answers.
+# So `ce` shifts ~1.4% of answers, and no conclusion should turn on it.
 ANSWER_SOURCES: dict[str, str] = {
     "prose": "COALESCE(answer_text, ce_answer)",
     "ce": "COALESCE(ce_answer, answer_text)",
@@ -54,9 +57,21 @@ _SCALE = "({a} GLOB '[1-5]' OR {a} GLOB '[1-5][^0-9]*')"
 _IS_THREE = "({a} GLOB '3' OR {a} GLOB '3[^0-9]*')"
 
 # Evidence from EITHER parse counts. Ours missing while theirs is present means
-# our regex missed the line, not that the search found nothing — reading that as
-# "no evidence" is what would inflate the default-3 rate on the 1,047 runs.
+# our regex missed the line, not that the search found nothing.
 _HAS_EVIDENCE = "(evidence_shape = 'present' OR ce_evidence_shape = 'present')"
+
+# Whether ANY parse was in a position to see evidence for this answer.
+#
+# Measured on the real corpus 2026-08-04: `citation_evidence` covers exactly the
+# runs whose prose parsed — 49,373 runs x 48 = 2,369,904 answers, to the unit —
+# and is ABSENT for the 1,047 runs it does not. Those runs' 50,256 answers survive
+# only through `answer_dict`, which carries no evidence at all.
+#
+# So for them "no evidence" is not an observation, it is our parse failing. Their
+# prose exists; nothing here could read it. Counting a 3 among them as a
+# default-3 would assert something unmeasurable — the exact failure invariant 5
+# forbids — so they are excluded from the default-3 denominator and reported.
+_EVIDENCE_OBSERVABLE = "(parsed_from = 'answers_text' OR ce_answer IS NOT NULL)"
 
 
 @dataclass(frozen=True)
@@ -65,6 +80,7 @@ class QuestionRow:
 
     qnum: int
     n: int
+    n_ev_seen: int
     n_scale: int
     n_text: int
     n_null: int
@@ -102,7 +118,8 @@ class QuestionRow:
 
     @property
     def default3_rate(self) -> float | None:
-        return self._rate(self.n_default3, self.n)
+        """Over answers where SOME parse could see evidence — see _EVIDENCE_OBSERVABLE."""
+        return self._rate(self.n_default3, self.n_ev_seen)
 
     @property
     def noinfo_rate(self) -> float | None:
@@ -186,7 +203,13 @@ def question_scorecard(conn: sqlite3.Connection, source: str = "prose") -> Score
 
     ans = f"TRIM({ANSWER_SOURCES[source]})"
     scale, is_three = _SCALE.format(a="ans"), _IS_THREE.format(a="ans")
-    noinfo = f"(coa_is_null(ans) OR ({is_three} AND NOT has_ev))"
+    # `ev_seen` gates the default-3 half only. A NULL answer is a NULL answer
+    # whichever parse produced it, so the NULL rate keeps the full denominator;
+    # only the evidence-dependent half narrows. That makes `noinfo` UNDER-state
+    # rather than over-state, which is the right direction to err in a document
+    # arguing another team should spend less.
+    default3 = f"({is_three} AND NOT has_ev AND ev_seen)"
+    noinfo = f"(coa_is_null(ans) OR {default3})"
 
     # Citations are pre-aggregated to one row per (record, run, qnum) BEFORE the
     # join, which is load-bearing twice over. `citations` holds both sources for
@@ -205,6 +228,7 @@ def question_scorecard(conn: sqlite3.Connection, source: str = "prose") -> Score
                 f.qnum                                        AS qnum,
                 {ans}                                         AS ans,
                 {_HAS_EVIDENCE}                               AS has_ev,
+                {_EVIDENCE_OBSERVABLE}                        AS ev_seen,
                 f.agree_with_dict                             AS ad,
                 f.agree_with_ce                               AS ac,
                 (c.qnum IS NOT NULL)                          AS has_cite
@@ -221,7 +245,8 @@ def question_scorecard(conn: sqlite3.Connection, source: str = "prose") -> Score
             SUM({scale})                                          AS n_scale,
             SUM(NOT coa_is_null(ans) AND NOT {scale})             AS n_text,
             SUM(coa_is_null(ans))                                 AS n_null,
-            SUM({is_three} AND NOT has_ev)                        AS n_default3,
+            SUM(ev_seen)                                          AS n_ev_seen,
+            SUM({default3})                                       AS n_default3,
             SUM({noinfo})                                         AS n_noinfo,
             SUM(has_cite)                                         AS n_cited,
             SUM(ad = 0)                                           AS n_dict_differ,
@@ -239,6 +264,7 @@ def question_scorecard(conn: sqlite3.Connection, source: str = "prose") -> Score
             QuestionRow(
                 qnum=r["qnum"],
                 n=r["n"],
+                n_ev_seen=r["n_ev_seen"] or 0,
                 n_scale=r["n_scale"] or 0,
                 n_text=r["n_text"] or 0,
                 n_null=r["n_null"] or 0,
@@ -348,6 +374,24 @@ def _pct(value: float | None) -> str:
     return "    -" if value is None else f"{value * 100:5.1f}"
 
 
+def _evidence_observable_line(sc: Scorecard) -> str:
+    """Name the answers `d3` had to exclude, and why — never silently narrow it.
+
+    These are runs where no parse could read the prose, so "no evidence" would be
+    our failure rather than a measurement. `noinfo` therefore under-states for
+    them, which is the safe direction; saying nothing would leave a reader
+    assuming the full corpus was scored.
+    """
+    seen = sum(r.n_ev_seen for r in sc.rows)
+    blind = sc.n_answers - seen
+    if not blind:
+        return "  d3 denominator     all answers (every one had a parse that could see evidence)"
+    return (
+        f"  d3 denominator     {seen:,} of {sc.n_answers:,} — excludes {blind:,} answers whose\n"
+        f"                     run no parse could read, so evidence was never observable"
+    )
+
+
 def render_scorecard(sc: Scorecard, top: int = 10) -> str:
     """The scorecard as one paste-ready block. No question text — see module docstring."""
     if not sc.rows:
@@ -357,7 +401,8 @@ def render_scorecard(sc: Scorecard, top: int = 10) -> str:
         "QUESTION SCORECARD",
         f"  answer source      {sc.source}  ({ANSWER_SOURCES[sc.source]})",
         f"  answers            {sc.n_answers:,} over {len(sc.rows)} questions",
-        "  all columns are % of that question's n, except n itself",
+        _evidence_observable_line(sc),
+        "  all columns are % of that question's n, except n itself and d3",
         "",
         "     Q        n  kind    null     d3  noinfo   cite   dict≠    ce≠  agree",
     ]

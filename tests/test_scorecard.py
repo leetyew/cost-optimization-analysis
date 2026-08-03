@@ -84,9 +84,10 @@ def test_dict_recovered_answers_are_scored_not_dropped(corpus, sc, golden: dict)
     """Trap 6, and the reason the denominator is every answer.
 
     One planted run's prose is unreadable, so all 48 of its answers come from
-    answer_dict with a NULL evidence_text by construction. They still carry real
-    answers and real citation_evidence, so excluding them would discard
-    measurements rather than protect them.
+    answer_dict. They still carry real ANSWERS, so dropping them from the NULL
+    rate would discard measurements rather than protect them — only the
+    evidence-dependent half narrows, which
+    `test_default3_excludes_answers_whose_evidence_was_unobservable` covers.
     """
     n_dict = corpus.conn.execute(
         "SELECT COUNT(*) FROM answers WHERE parsed_from = 'answer_dict'"
@@ -96,18 +97,32 @@ def test_dict_recovered_answers_are_scored_not_dropped(corpus, sc, golden: dict)
     assert sc.n_answers == corpus.conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0]
 
 
-def test_evidence_from_their_parse_repairs_our_failure(corpus) -> None:
-    """citation_evidence supplies evidence where our regex found none.
+def test_unreadable_runs_have_no_evidence_from_any_source(corpus, golden: dict) -> None:
+    """citation_evidence is co-derived with the prose, so it dies with it.
 
-    Without this the unreadable run's 48 answers would every one read as
-    "no evidence", and every 3 among them as a default-3 — inflating the primary
-    metric on the strength of our own parse failure.
+    Measured on the real corpus 2026-08-04: it covers exactly the 49,373 runs
+    whose prose parsed (x48 = 2,369,904 answers, to the unit) and is ABSENT for
+    the other 1,047. It is therefore NOT the repair path for the runs that need
+    one — only `answer_dict` survives them, and it carries no evidence at all.
     """
-    repaired = corpus.conn.execute(
-        "SELECT COUNT(*) FROM answer_facts "
-        "WHERE evidence_shape != 'present' AND ce_evidence_shape = 'present'"
+    blind = corpus.conn.execute(
+        "SELECT COUNT(*) FROM answers WHERE parsed_from = 'answer_dict' AND ce_answer IS NULL"
     ).fetchone()[0]
-    assert repaired > 0
+    assert blind == golden["outputs"]["evidence_unobservable"]
+
+
+def test_default3_excludes_answers_whose_evidence_was_unobservable(sc, golden: dict) -> None:
+    """Invariant 5: a 3 we cannot check is not a measured default-3.
+
+    Their prose exists for those runs; nothing here could read it. Scoring them
+    as evidence-less would charge our own parse failure to the other team's
+    question set — and it is 50,256 answers on the real corpus.
+    """
+    blind = golden["outputs"]["evidence_unobservable"]
+    assert blind > 0, "fixture must contain an unreadable run for this to mean anything"
+    assert sum(r.n_ev_seen for r in sc.rows) == sc.n_answers - blind
+    for r in sc.rows:
+        assert r.n_default3 <= r.n_ev_seen
 
 
 def test_kind_is_derived_from_answers_never_from_question_text(sc) -> None:

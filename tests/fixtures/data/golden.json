@@ -20,7 +20,7 @@
     "UNKNOWN_ACTION_TYPE",
     "VOTE_VALUE_LIST"
   ],
-  "fingerprint": "e74224b13ea9e34f",
+  "fingerprint": "d9d32c499ea35c1a",
   "inputs": {
     "dup_input_se10": 1,
     "n_records": 31,
@@ -36,7 +36,7 @@
     "bad_json_lines": 1,
     "ce_answer_mismatch": 1,
     "citation_shape_unexpected_records": 1,
-    "citation_source_mismatch_records": 2,
+    "citation_source_mismatch_records": 1,
     "citations_outside_blocks": 26,
     "dup_output_se10": 1,
     "empty_placeholders": 199,
@@ -45,6 +45,7 @@
     "evidence_empty": 41,
     "evidence_null": 1294,
     "evidence_present": 1919,
+    "evidence_unobservable": 48,
     "input_output_field_conflict_records": 1,
     "n_records": 31,
     "n_runs": 70,
@@ -54,7 +55,7 @@
     "question_set_drift": 1,
     "scale_answers": 2519,
     "scale_default_3": 921,
-    "scale_default_3_no_evidence": 305,
+    "scale_default_3_no_evidence": 300,
     "text_answers": 840,
     "vote_value_list_records": 1
   },
