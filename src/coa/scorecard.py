@@ -416,9 +416,12 @@ def render_scorecard(sc: Scorecard, top: int = 10) -> str:
     out += ["", "  DROP CANDIDATES (highest `noinfo` — the answer carried nothing)"]
     ranked = sc.drop_candidates
     for r in ranked[:top]:
+        # Components as COUNTS, not rates. `noinfo` is over n while `d3` is over
+        # the observable subset, so printing both as percentages here would read
+        # as a decomposition that does not add up.
         out.append(
             f"  {r.qnum:>4}  noinfo {_pct(r.noinfo_rate)}%  "
-            f"(NULL {_pct(r.null_rate)}%, default-3 {_pct(r.default3_rate)}%)  "
+            f"(NULL {r.n_null:,} + default-3 {r.n_default3:,} of {r.n:,})  "
             f"cited {_pct(r.citation_rate)}%  {r.kind}"
         )
     if len(ranked) > top:
