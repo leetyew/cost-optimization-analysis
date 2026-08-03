@@ -378,6 +378,77 @@ Two consequences that are easy to get backwards:
   as default-3 would have charged 1,047 runs' worth of our own parse bugs to the other team's
   question set. `answer_facts` (a view in `db.py`) classifies both, in one place.
 
+## P4 headline findings (measured 2026-08-04, real corpus)
+
+The scorecard ran on the post-remap DB. Three results, in descending order of how much
+they change the deliverable.
+
+### 1. The drop-candidate head is steep — four questions are close to inert
+
+Top of `DROP CANDIDATES`, over 50,420 question-runs each:
+
+| Q | noinfo | cited | kind |
+|---|---|---|---|
+| 22 | **91.6%** | 1.1% | mixed |
+| 9 | 82.7% | 2.9% | mixed |
+| 13 | 81.9% | 4.8% | mixed |
+| 36 | 77.5% | 5.1% | mixed |
+
+Q22 carried no information in ~46,185 of 50,420 runs and produced a citation in ~555.
+A steep head was the good case: it means individual questions are droppable and the
+report can name them, rather than the flat distribution that would have forced the
+weaker consolidation-only argument.
+
+### 2. `default-3` contributes essentially nothing — `noinfo` IS the NULL rate
+
+On Q1-Q4 the `d3` column reads 0.0 / 0.1 / 0.0 / 0.0, and `noinfo` equals `null` to the
+decimal. The default-3 mechanism was assumed to be half the drop signal; on the real
+corpus the NULL answer carries it alone. Do not describe the headline as "NULL plus
+default-3" without re-checking `d3` across all 48 — on the evidence so far it is a
+rounding error. The apparatus still earns its place by *proving* that, and by keeping
+the 50,256 unobservable answers out of a denominator they would have distorted.
+
+### 3. Repeated runs disagree more often than they agree
+
+`agree` on Q1-Q4: 42.3 / 38.8 / 36.6 / 53.9. **Q1 is the clean case** — pure `scale`, so
+the answer is a 1-5 value and normalization cannot confound it. Fewer than half of
+repeat-run merchants got the same answer twice, against 20% for chance on five values.
+Q1 also has `null 0.0` and `d3 0.0`: it always returns a confident-looking number, and
+that number reproduces 42% of the time.
+
+This may be the stronger cost argument. A question that returns nothing is cheap to cut;
+one that returns a *different answer each run* is worse, because everything downstream
+treats it as a finding. Caveat for the `mixed` rows only: exact-normalized-string
+agreement is harsh on free text, where two runs can both be right and phrased
+differently. Q1 has no such excuse.
+
+### The blocker on any savings figure: searches are not attributable to questions
+
+**Do not convert these rates into a dollar figure by proportional allocation.** Cost is
+42.9% search fee, and nothing measured so far attributes a search call to a question:
+`web_search_call.action.sources` is not enabled, so the call -> question link does not
+exist in the corpus. `citation -> question` is exact via `a_key`, but a citation is the
+*output* of a search, not the search itself.
+
+That gap hides two opposite readings of the same 91.6%, and they differ by the entire
+search fee:
+
+- **The question never triggers a search.** Dropping it saves prompt and answer tokens only.
+- **The question triggers searches that find nothing.** Dropping it saves the searches too
+  — and a question that searches and comes back empty 91.6% of the time is the single
+  most expensive thing in the corpus.
+
+A near-zero citation rate does **not** settle it: searching and finding nothing is exactly
+what produces a NULL answer with no citation. The pessimistic reading is at least as
+consistent with the data as the optimistic one.
+
+**P3 is the bridge, and it is now unblocked.** PII-templated query archetypes are
+human-readable (`"what type of building is at <ZIP>"`), so an archetype maps to a question
+by inspection even though the corpus carries no explicit link. That converts "Q22 is inert"
+into "Q22 costs N searches", which is the claim the report actually needs. Label the
+mapping as the human judgement it is — it is the one heuristic worth keeping, and
+invariant 5 requires it be named as such.
+
 ## Stack
 
 - Python **3.10+** (the operator's analysis environment runs 3.12; the pin follows the
