@@ -165,21 +165,34 @@ class TierUsage:
 def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
     """Token and call volume per service tier.
 
-    Search calls are counted per tier by joining through `runs`, because the fee
-    applies only to `action_type = 'search'` — open_page and find_in_page consume
-    tokens but carry no call fee.
+    Search calls are counted per tier through `runs`, because the fee applies only
+    to `action_type = 'search'` — open_page and find_in_page consume tokens but
+    carry no call fee.
+
+    Two things this must not do, both of which silently *understate* cost:
+
+    * **Drop calls whose `run_pk` is NULL.** An inner join would, and a billed
+      call vanishing from a cost report is the wrong direction to be wrong. They
+      are bucketed under `<unset>` instead, and the tier list is the union of both
+      sides so a tier with calls but no runs still appears.
+    * **Let an empty `queries` array count as zero billed searches.** A call bills
+      at least once under either billing unit, so the per-entry count floors at 1;
+      without that the high bound could fall below the low one.
     """
-    rows = conn.execute(
-        """
-        SELECT
-            COALESCE(r.service_tier, '<unset>')                   AS tier,
-            COUNT(DISTINCT r.id)                                  AS n_runs,
-            COALESCE(SUM(r.input_tokens), 0)                      AS input_tokens,
-            COALESCE(SUM(r.cache_read), 0)                        AS cache_read,
-            COALESCE(SUM(r.output_tokens), 0)                     AS output_tokens
-        FROM runs r GROUP BY tier ORDER BY tier
-        """
-    ).fetchall()
+    runs = {
+        r["tier"]: r
+        for r in conn.execute(
+            """
+            SELECT
+                COALESCE(service_tier, '<unset>')  AS tier,
+                COUNT(*)                           AS n_runs,
+                COALESCE(SUM(input_tokens), 0)     AS input_tokens,
+                COALESCE(SUM(cache_read), 0)       AS cache_read,
+                COALESCE(SUM(output_tokens), 0)    AS output_tokens
+            FROM runs GROUP BY tier
+            """
+        )
+    }
     calls = {
         r["tier"]: (r["n_calls"], r["n_entries"])
         for r in conn.execute(
@@ -189,9 +202,9 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
                 COUNT(*)                            AS n_calls,
                 COALESCE(SUM(
                     CASE WHEN c.queries_json IS NULL THEN 1
-                         ELSE json_array_length(c.queries_json) END
+                         ELSE MAX(1, json_array_length(c.queries_json)) END
                 ), 0)                               AS n_entries
-            FROM search_calls c JOIN runs r ON r.id = c.run_pk
+            FROM search_calls c LEFT JOIN runs r ON r.id = c.run_pk
             WHERE c.action_type = 'search'
             GROUP BY tier
             """
@@ -199,15 +212,15 @@ def tier_usage(conn: sqlite3.Connection) -> list[TierUsage]:
     }
     return [
         TierUsage(
-            tier=r["tier"],
-            n_runs=r["n_runs"],
-            input_tokens=r["input_tokens"],
-            cache_read=r["cache_read"],
-            output_tokens=r["output_tokens"],
-            n_search_calls=calls.get(r["tier"], (0, 0))[0],
-            n_query_entries=calls.get(r["tier"], (0, 0))[1],
+            tier=tier,
+            n_runs=runs[tier]["n_runs"] if tier in runs else 0,
+            input_tokens=runs[tier]["input_tokens"] if tier in runs else 0,
+            cache_read=runs[tier]["cache_read"] if tier in runs else 0,
+            output_tokens=runs[tier]["output_tokens"] if tier in runs else 0,
+            n_search_calls=calls.get(tier, (0, 0))[0],
+            n_query_entries=calls.get(tier, (0, 0))[1],
         )
-        for r in rows
+        for tier in sorted(set(runs) | set(calls))
     ]
 
 
@@ -244,7 +257,9 @@ def render_cost_report(usage: list[TierUsage], pricing: Pricing) -> str:
             out.append(f"  {'':<10} UNPRICED — no rates configured for this tier")
             continue
         low_total += low
-        high_total += high or low
+        # Explicit None test: a legitimate cost of exactly 0.0 is falsy, and `or`
+        # would silently substitute the low bound for it.
+        high_total += low if high is None else high
         out.append(
             f"  {'':<10} ${low:,.2f} if billed per call   —   "
             f"${high:,.2f} if billed per query entry"

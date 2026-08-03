@@ -269,3 +269,41 @@ def test_named_but_unconfigured_tier_borrows_nothing() -> None:
     """flex must not silently inherit standard's numbers."""
     priced = Pricing(tiers={"standard": STANDARD, "flex": TierRates()})
     assert usage(tier="flex").cost(priced.for_tier("flex")) is None
+
+
+def test_call_with_no_run_is_still_billed(conn: sqlite3.Connection) -> None:
+    """An inner join would drop it, understating cost — the wrong way to be wrong."""
+    conn.execute(
+        "INSERT INTO runs (id,se10,run_id,run_key,service_tier,input_tokens,"
+        "output_tokens,cache_read,src_file,src_line) "
+        "VALUES (1,'A',0,'run_0','standard',100,50,10,'f',1)"
+    )
+    for run_pk in (1, None):
+        conn.execute(
+            "INSERT INTO search_calls (se10,run_pk,call_index,action_type,"
+            "queries_json,raw_json,parse_conf,src_file,src_line) "
+            "VALUES ('A',?,0,'search','[\"a\"]','{}','clean','f',1)",
+            (run_pk,),
+        )
+    conn.commit()
+    by_tier = {u.tier: u for u in tier_usage(conn)}
+    assert sum(u.n_search_calls for u in by_tier.values()) == 2
+    assert by_tier["<unset>"].n_search_calls == 1  # orphan bucketed, not dropped
+
+
+def test_empty_queries_array_still_bills_once(conn: sqlite3.Connection) -> None:
+    """Otherwise the per-entry bound could fall below the per-call bound."""
+    conn.execute(
+        "INSERT INTO runs (id,se10,run_id,run_key,service_tier,input_tokens,"
+        "output_tokens,cache_read,src_file,src_line) "
+        "VALUES (1,'A',0,'run_0','standard',0,0,0,'f',1)"
+    )
+    conn.execute(
+        "INSERT INTO search_calls (se10,run_pk,call_index,action_type,queries_json,"
+        "raw_json,parse_conf,src_file,src_line) "
+        "VALUES ('A',1,0,'search','[]','{}','clean','f',1)"
+    )
+    conn.commit()
+    (u,) = tier_usage(conn)
+    assert (u.n_search_calls, u.n_query_entries) == (1, 1)
+    assert u.cost_per_query_billing(STANDARD) >= u.cost(STANDARD)
