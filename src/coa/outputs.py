@@ -328,7 +328,9 @@ def _ingest_record(
             se10=se10,
             src_file=src_name,
             src_line=line_no,
-            raw_excerpt=json.dumps(sorted(record)[:MAX_LISTED]),
+            # No raw_excerpt: `detail` already carries the key list, and this code
+            # can fire once per record. Printing it twice doubles the paste-back
+            # payload for nothing, and that channel is the whole operator loop.
             detail=(
                 f"record has no usable `answers` map (found "
                 f"{type(raw_answers).__name__}"
