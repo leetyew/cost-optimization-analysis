@@ -6,7 +6,11 @@
 # determinism. Git cannot re-include a path under an excluded directory, so an
 # unanchored `data/` here would silently drop the fixture tree from version
 # control.
-/coa.sqlite*
+# Any analysis DB at the repo root, not just the configured `coa.sqlite`. A
+# schema change means ingesting into a second DB alongside the old one, and
+# `/coa.sqlite*` matched only that one name — so `coa_v2.sqlite` would have been
+# an untracked file full of merchant PII that `git add -A` would happily stage.
+/*.sqlite*
 /reports/
 /data/
 
