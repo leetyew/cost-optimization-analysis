@@ -252,7 +252,8 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         f"votes {totals['out_no_votes']}  (of {totals['out_records']} records)",
         f"    runs             {totals['out_runs']} "
         f"({totals['out_answer_blocks']} answer blocks, "
-        f"{totals['out_answers_from_dict']} recovered from answer_dict)",
+        f"{totals['out_answers_from_dict']} recovered from answer_dict, "
+        f"{totals['out_answers_from_ce']} from citation_evidence)",
         f"    short runs       {totals['out_short_runs']} "
         f"(fewer answer blocks than the canonical question set)",
         # Expected to be ~every record: the questions carry merchant values inline.

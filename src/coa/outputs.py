@@ -646,8 +646,6 @@ def _store_run(
         """One answer row, carrying whichever of the three parses exist for it."""
         ce_answer, ce_evidence = ce.get(qnum, (None, None)) if qnum is not None else (None, None)
         agree_ce = None if ce_answer is None else int(_norm_text(answer) == _norm_text(ce_answer))
-        if ce_answer is not None:
-            ctx.stats["out_ce_comparable" if agree_ce else "out_ce_disagreements"] += 1
         return (
             ctx.se10,
             ctx.output_id,
