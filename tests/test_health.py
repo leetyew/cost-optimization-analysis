@@ -139,3 +139,17 @@ def test_pii_schema_block_survives_unparseable_raw_json(conn: sqlite3.Connection
     conn.execute("INSERT INTO merchants (se10, raw_json) VALUES (?, ?)", ("1", "{truncated..."))
     out = health_report(conn)
     assert "no parseable merchant raw_json to sample" in out
+
+
+def test_pii_schema_block_distinguishes_no_merchants_from_bad_json(
+    conn: sqlite3.Connection,
+) -> None:
+    """Positive confirmation: an empty table is not a parse failure.
+
+    Reporting "no parseable raw_json" on a DB with no merchants at all sends the
+    operator hunting a JSON bug that does not exist — the ambiguity this module
+    was written to remove.
+    """
+    empty = health_report(conn)
+    assert "no parseable merchant raw_json to sample" not in empty
+    assert "(no merchants)" in empty

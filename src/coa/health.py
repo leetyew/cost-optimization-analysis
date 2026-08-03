@@ -67,6 +67,12 @@ def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
     """
     from .inputs import PII_FIELDS
 
+    # Positive confirmation: "no merchants ingested" and "merchants ingested whose
+    # raw_json will not parse" are different failures with different fixes, and
+    # this block reported both as the latter.
+    if not _scalar(conn, "SELECT COUNT(*) FROM merchants"):
+        return [_line("(no merchants)", "ingest input/ before this block means anything")]
+
     out = [
         _breakdown(
             conn,
