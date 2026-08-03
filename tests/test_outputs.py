@@ -439,3 +439,30 @@ def test_no_answer_row_is_left_without_provenance(corpus) -> None:
         "WHERE NOT EXISTS (SELECT 1 FROM output_records o WHERE o.id = a.output_id)"
     ).fetchone()["n"]
     assert orphaned == 0
+
+
+@pytest.mark.parametrize("answers", [None, {}, [], "text", {"run_0": "Q1. t\nA1. 2"}])
+def test_record_without_usable_answers_is_flagged(
+    conn: sqlite3.Connection, answers: object
+) -> None:
+    """2000 records yielding 0 runs must not look like a normal ingest.
+
+    Without this the only signal was an unprinted counter, so a renamed or
+    restructured `answers` key would produce an empty analysis that reported
+    itself as success.
+    """
+    _, recorder = run(conn, [record(answers=answers)])
+    expected = 0 if isinstance(answers, dict) and answers else 1
+    assert recorder.counts.get("OUTPUT_NO_ANSWERS", 0) == expected
+
+
+def test_no_answers_anomaly_names_the_keys_that_were_present(
+    conn: sqlite3.Connection,
+) -> None:
+    """The operator needs to see what the record DOES have, or diagnosing the
+    rename costs another round-trip across the air gap."""
+    run(conn, [record(answers=None)])
+    detail = conn.execute(
+        "SELECT detail FROM anomalies WHERE code = 'OUTPUT_NO_ANSWERS'"
+    ).fetchone()["detail"]
+    assert "voted_majority" in detail and "answer_dict" in detail

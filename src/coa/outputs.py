@@ -309,12 +309,33 @@ def _ingest_record(
     ctx = _Ctx(conn, rec, src_name, line_no, se10, cur.lastrowid, stats)
     stats["out_records"] += 1
 
-    answers = record.get("answers")
-    answers = answers if isinstance(answers, dict) else {}
+    raw_answers = record.get("answers")
+    answers = raw_answers if isinstance(raw_answers, dict) else {}
     answer_dict = record.get("answer_dict")
     answer_dict = answer_dict if isinstance(answer_dict, dict) else {}
     if isinstance(n_runs, int) and n_runs != len(answers):
         stats["out_n_runs_mismatch"] += 1
+
+    # A record that yields no runs contributes no answers, no prose citations and
+    # nothing to the per-question rates that are the primary deliverable. Silently
+    # storing the shell and moving on is exactly the failure this codebase keeps
+    # hitting, so it speaks — and names the keys actually present, because the
+    # likely cause is `answers` being absent or under a different name.
+    if not answers:
+        stats["out_no_answers"] += 1
+        rec.record(
+            "OUTPUT_NO_ANSWERS",
+            se10=se10,
+            src_file=src_name,
+            src_line=line_no,
+            raw_excerpt=json.dumps(sorted(record)[:MAX_LISTED]),
+            detail=(
+                f"record has no usable `answers` map (found "
+                f"{type(raw_answers).__name__}"
+                + (f", {len(raw_answers)} entries" if isinstance(raw_answers, dict) else "")
+                + f"); top-level keys present: {_capped(sorted(record))}"
+            ),
+        )
 
     canonical = _canonical_qnums(conn) or set(questions)
     # Each run's prose URLs are kept from the answer pass and handed to the
