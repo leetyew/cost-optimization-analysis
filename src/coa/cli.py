@@ -36,7 +36,7 @@ from .metrics import (
     render_open_page_report,
     tier_usage,
 )
-from .outputs import ingest_output
+from .outputs import ANSWER_KEYS, ingest_output
 from .weblogs import ingest_weblog, reparse
 
 # (kind, subdir, suffix, parser). Order matters: input/ is ingested before output/
@@ -243,7 +243,7 @@ def _ingest_summary(conn: sqlite3.Connection, totals: Counter, seen: int, skippe
         + (
             ", ".join(
                 f"{k} {totals[f'out_answers_key_{k}']}"
-                for k in ("answer", "answers")
+                for k in ANSWER_KEYS
                 if totals[f"out_answers_key_{k}"]
             )
             or f"NONE FOUND — {totals['out_no_answers']} record(s) yielded no answers"
