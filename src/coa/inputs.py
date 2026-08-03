@@ -224,13 +224,6 @@ def ingest_input(
             ),
         )
         stats["in_records"] += 1
-        # Per-column fill, so a key that stops matching shows up as a number rather
-        # than as a table of NULLs nobody queries. Fourteen of these were empty for
-        # the whole real corpus and the only trace was `pii terms 1.000 per
-        # merchant`, two layers away.
-        for column, key in MERCHANT_KEY_BY_COLUMN.items():
-            if record.get(key) not in (None, ""):
-                stats[f"in_col_{column}"] += 1
 
         terms = pii_terms_for(record)
         if not terms:
