@@ -15,6 +15,7 @@ absent, which no anomaly count could have told you.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 # Wide enough for a label, narrow enough that the block still pastes cleanly.
@@ -37,6 +38,72 @@ def _line(label: str, value: object) -> str:
 def _breakdown(conn: sqlite3.Connection, sql: str, label: str, empty: str = "none") -> str:
     parts = [f"{r[0]} {r[1]}" for r in _rows(conn, sql)]
     return _line(label, ", ".join(parts) if parts else empty)
+
+
+# Enough records to see optional keys without reading the whole table. The input
+# schema has "many more keys" than the parser names, but it is one schema — a key
+# absent from 200 records is not one the templating can rely on either.
+_SCHEMA_SAMPLE = 200
+
+# The key list can be long, and this block has to stay pasteable.
+_MAX_KEYS = 60
+
+
+def _pii_schema_lines(conn: sqlite3.Connection) -> list[str]:
+    """Why `pii_terms` is thin: which PII_FIELDS keys the real input actually has.
+
+    On the real corpus this comes out at exactly 1.000 term per merchant against
+    ~11.7 on fixtures, which means all but one `PII_FIELDS` key misses the real
+    schema. That is a PRIVACY defect rather than a metrics one — P3 templating
+    masks a query by matching these terms, so nine missing keys means merchant
+    names, streets and phones stay unmasked in anything the report quotes.
+
+    Two lines settle it without a schema round-trip: which field buckets produced
+    terms, and which key spellings the records actually carry.
+
+    **Key NAMES only, never values.** The names are schema and safe to paste; the
+    values are merchant PII and must not cross the air gap. `_capped(sorted(record))`
+    in the outputs parser already relies on the same distinction.
+    """
+    from .inputs import PII_FIELDS
+
+    out = [
+        _breakdown(
+            conn,
+            "SELECT field, COUNT(*) FROM pii_terms GROUP BY field ORDER BY 2 DESC",
+            "terms by field",
+            empty="NONE — no merchant PII can be templated out",
+        )
+    ]
+
+    wanted = {key for keys in PII_FIELDS.values() for key in keys}
+    present: set[str] = set()
+    n_sampled = 0
+    for row in conn.execute("SELECT raw_json FROM merchants LIMIT ?", (_SCHEMA_SAMPLE,)):
+        try:
+            record = json.loads(row["raw_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            n_sampled += 1
+            present.update(record)
+
+    if not n_sampled:
+        return out + [_line("input schema", "no parseable merchant raw_json to sample")]
+
+    matched, missing = sorted(wanted & present), sorted(wanted - present)
+    out.append(_line("PII_FIELDS found", f"{len(matched)} of {len(wanted)}: {', '.join(matched)}"))
+    out.append(
+        _line(
+            "PII_FIELDS missing", ", ".join(missing) if missing else "none — schema fully matched"
+        )
+    )
+    keys = sorted(present)
+    shown = ", ".join(keys[:_MAX_KEYS])
+    extra = f" ... (+{len(keys) - _MAX_KEYS} more)" if len(keys) > _MAX_KEYS else ""
+    out.append(_line("input keys seen", f"{len(keys)} over {n_sampled} records"))
+    out.append(f"    {shown}{extra}")
+    return out
 
 
 def _answer_source_lines(conn: sqlite3.Connection, n_a: int) -> list[str]:
@@ -141,6 +208,9 @@ def health_report(conn: sqlite3.Connection) -> str:
     out.append(_line("runs", _scalar(conn, "SELECT COUNT(*) FROM runs")))
     out.append(_line("output records", _scalar(conn, "SELECT COUNT(*) FROM output_records")))
     out.append(_line("pii terms", _scalar(conn, "SELECT COUNT(*) FROM pii_terms")))
+
+    out += ["", "INPUT SCHEMA / PII"]
+    out += _pii_schema_lines(conn)
 
     # 48 is the whole premise of the per-question scorecard. Anything else and
     # the primary deliverable has no stable denominator.

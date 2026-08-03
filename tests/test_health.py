@@ -104,3 +104,38 @@ def test_corpus_report_is_paste_sized(corpus) -> None:
     # and the alternative is an ad-hoc SQL round-trip across the air gap.
     assert len(out.splitlines()) < 80, "doctor output must stay pasteable"
     assert "canonical set          48" in out
+
+
+def test_pii_schema_block_names_the_keys_that_missed(corpus) -> None:
+    """The line that explains a thin `pii_terms` without a schema round-trip.
+
+    Real data yields exactly 1.000 term per merchant against ~11.7 here, meaning
+    nine of ten `PII_FIELDS` keys miss the real input schema. Knowing WHICH is the
+    whole diagnostic, and it is unavailable from any count already printed.
+    """
+    from coa.inputs import PII_FIELDS
+
+    out = health_report(corpus.conn)
+    assert "INPUT SCHEMA / PII" in out
+    wanted = {key for keys in PII_FIELDS.values() for key in keys}
+    assert f"{len(wanted)} of {len(wanted)}" in out, "fixtures match PII_FIELDS by construction"
+    for key in wanted:
+        assert key in out
+
+
+def test_pii_schema_block_prints_key_names_never_values(corpus) -> None:
+    """Schema is safe to paste across the air gap; merchant values are not."""
+    out = health_report(corpus.conn)
+    for row in corpus.conn.execute(
+        "SELECT street, email, phone, owner_name, owner_postal FROM merchants LIMIT 10"
+    ):
+        for value in row:
+            assert value, "fixture merchants must carry PII for this to prove anything"
+            assert str(value) not in out
+
+
+def test_pii_schema_block_survives_unparseable_raw_json(conn: sqlite3.Connection) -> None:
+    """`raw_json` is retained verbatim, so it can hold anything a source line did."""
+    conn.execute("INSERT INTO merchants (se10, raw_json) VALUES (?, ?)", ("1", "{truncated..."))
+    out = health_report(conn)
+    assert "no parseable merchant raw_json to sample" in out
