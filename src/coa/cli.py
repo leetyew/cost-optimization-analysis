@@ -10,6 +10,7 @@ Subcommands, in the order they are meant to be run:
     coa reparse    re-extract fields from stored raw lines, no source files read
     coa analyze    templating, archetypes, agreement, cost
     coa scorecard  per-question NULL / default-3 / citation / agreement rates
+    coa runs       run-count lever: marginal run cost + whether run_2 decides anything
     coa report     markdown + CSV bundle under reports/<timestamp>/
     coa doctor     one-screen health check, ready to paste back
     coa anomalies  summary | show CODE      <- the operator feedback channel
@@ -48,6 +49,13 @@ from .normalize import (
     templating_picture,
 )
 from .outputs import ingest_output
+from .runs import (
+    render_run_economics,
+    render_third_run,
+    run_count_distribution,
+    third_run_picture,
+    usage_by_run,
+)
 from .scorecard import ANSWER_SOURCES, question_scorecard, render_scorecard
 from .weblogs import ingest_weblog, reparse
 
@@ -441,6 +449,24 @@ def cmd_scorecard(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
 
+def cmd_runs(args: argparse.Namespace, cfg: Config) -> int:
+    """The run-count lever: what a marginal run costs, and whether it decides anything.
+
+    Its own command rather than another block inside `coa analyze` because it
+    answers a separate question and has to stay short enough to hand-type back
+    across the air gap. `coa doctor` is capped at one screen and could not absorb
+    it either.
+    """
+    conn = connect(cfg.db)
+    try:
+        print(render_run_economics(usage_by_run(conn), run_count_distribution(conn), cfg.pricing))
+        print()
+        print(render_third_run(third_run_picture(conn, ANSWER_SOURCES[args.answer_source])))
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
     print("report: not implemented until P5")
     return 0
@@ -516,6 +542,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="which stored parse to score: ours (prose) or theirs (ce). Default prose.",
     )
     sc.set_defaults(func=cmd_scorecard)
+
+    rn = sub.add_parser("runs", help="run-count lever: marginal run cost + third-run value")
+    rn.add_argument(
+        "--answer-source",
+        choices=sorted(ANSWER_SOURCES),
+        default="prose",
+        help="which stored parse to compare runs on. Default prose.",
+    )
+    rn.set_defaults(func=cmd_runs)
 
     rpt = sub.add_parser("report", help="build the markdown + CSV bundle")
     rpt.set_defaults(func=cmd_report)

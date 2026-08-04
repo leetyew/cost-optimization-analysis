@@ -430,16 +430,47 @@ the 50,256 unobservable answers out of a denominator they would have distorted.
 ### 3. Repeated runs disagree more often than they agree
 
 `agree` on Q1-Q4: 42.3 / 38.8 / 36.6 / 53.9. **Q1 is the clean case** — pure `scale`, so
-the answer is a 1-5 value and normalization cannot confound it. Fewer than half of
-repeat-run merchants got the same answer twice, against 20% for chance on five values.
-Q1 also has `null 0.0` and `d3 0.0`: it always returns a confident-looking number, and
-that number reproduces 42% of the time.
+the answer is a 1-5 value and normalization cannot confound it. Q1 also has `null 0.0` and
+`d3 0.0`: it always returns a confident-looking number, and that number fails to reproduce
+across a merchant's runs more often than not.
+
+**Do NOT read `agree` as "got the same answer twice."** It is
+`COUNT(DISTINCT norm(answer)) = 1` over **all** of a merchant's runs
+(`scorecard._inter_run_agreement`), gated on `>= 2` runs — so a 4-run merchant must have
+all four match. It is therefore **conflated by run count and decays mechanically as runs
+rise**, which the fixture shows plainly (2 runs: 3 of 17 agree; 3 runs: 0 of 5; 4 runs: 0
+of 4, on random answers). With the corpus averaging 2.6 runs, 42.3% mixes 2-run and 3-run
+populations and **understates** pairwise agreement. `coa runs` reports the clean figure,
+conditioned on exactly two runs.
 
 This may be the stronger cost argument. A question that returns nothing is cheap to cut;
 one that returns a *different answer each run* is worse, because everything downstream
 treats it as a finding. Caveat for the `mixed` rows only: exact-normalized-string
 agreement is harsh on free text, where two runs can both be right and phrased
 differently. Q1 has no such excuse.
+
+### The run-count lever (`coa runs`, added 2026-08-04)
+
+Cost scales with runs and needs **no attribution**, which makes it the one large lever not
+blocked on the call -> question link. 50,420 output-runs over 19,349 merchants is 2.6 each,
+so cutting to 2 removes ~23% of runs. Two things stop that becoming a naive 23% saving:
+
+- **Only part of it is linear.** The per-call search fee (42.9% of the bill) and output
+  tokens fall exactly in proportion. **Input does not** — `run_1+` reuse `run_0`'s prompt
+  at the cached rate, so the run being cut is already the *cheapest* on input. Costing a
+  marginal run at the average overstates the saving.
+- **Cost comes from the LOG run count, not the output one.** 50,420 is output-runs over
+  19,349 merchants; `usage_metadata` lives on the 19,269-merchant log side. Dividing cost
+  by the wrong population is the denominator error `SubqueryPicture` already exists to flag.
+
+**The "is the third run redundant?" question inverts.** For runs A, B, C: if A == B the
+majority is fixed and C *cannot* change it; if A != B there was no majority for C to
+change — C creates one. So "how often does run_2 flip the majority" reduces to "how often
+do the first two disagree", and **low agreement means run_2 is decisive OFTEN, not rarely**.
+A high `decisive` share is therefore *not* evidence the run earns its keep: it is a
+tie-break between two answers that already contradict each other, drawn from the same
+unreliable process. A high `no majority` share (all three differ) is worse still — the
+pipeline is not determining that question at all, and more runs will not fix it.
 
 ### The blocker on any savings figure: searches are not attributable to questions
 
