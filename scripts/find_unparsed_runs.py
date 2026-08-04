@@ -72,7 +72,11 @@ FROM per_run p JOIN output_records o ON o.id = p.output_id
 ORDER BY has_log, total_fail DESC, o.src_file, o.src_line, p.run_id
 """
 
+# `defect` leads, because this file is opened in a spreadsheet by someone who did
+# not write the query: `total_fail=1, has_log=0` is a decoding exercise, and the
+# whole point of the CSV is to be filterable at a glance.
 FIELDS = (
+    "defect",
     "se10",
     "src_file",
     "src_line",
@@ -91,6 +95,18 @@ def _prose_state(row) -> str:
     if row["any_dict"]:
         return "prose partial"
     return "prose ok"
+
+
+def _defect(row) -> str:
+    """Plain-language label for the CSV. A run can carry BOTH defects at once."""
+    parts = []
+    if row["total_fail"]:
+        parts.append("prose_unreadable")
+    elif row["any_dict"]:
+        parts.append("prose_partial")
+    if not row["has_log"]:
+        parts.append("output_only")
+    return "+".join(parts) or "ok"
 
 
 def main() -> int:
@@ -151,7 +167,9 @@ def main() -> int:
     with out.open("w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(FIELDS)
-        writer.writerows([tuple(r[f] for f in FIELDS) for r in bad])
+        writer.writerows(
+            [tuple(_defect(r) if f == "defect" else r[f] for f in FIELDS) for r in bad]
+        )
 
     if not bad:
         print("\nno defective runs -- nothing written")
