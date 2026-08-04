@@ -160,17 +160,30 @@ def main() -> int:
         )
         print(f"  overlap           {overlap:.1%} of the smaller set -> {verdict}")
 
-    # Only the defective rows go to the CSV; the healthy majority is noise there.
-    bad = [r for r in rows if r["any_dict"] or not r["has_log"]]
+    # ONE FILE PER DEFECT, not one file plus a filter. Each answers "show me the
+    # runs with defect X" directly, which is the only question anyone opens this
+    # for. A run carrying both defects appears in both files and its `defect`
+    # column still says so, so the overlap is not lost by splitting.
     cfg.reports.mkdir(parents=True, exist_ok=True)
-    out = cfg.reports / "unparsed_runs.csv"
-    with out.open("w", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(FIELDS)
-        writer.writerows(
-            [tuple(_defect(r) if f == "defect" else r[f] for f in FIELDS) for r in bad]
-        )
+    written = []
+    for name, match in (
+        ("prose_unreadable", lambda r: r["total_fail"]),
+        ("prose_partial", lambda r: r["any_dict"] and not r["total_fail"]),
+        ("output_only", lambda r: not r["has_log"]),
+    ):
+        subset = [r for r in rows if match(r)]
+        if not subset:
+            continue
+        out = cfg.reports / f"runs_{name}.csv"
+        with out.open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(FIELDS)
+            writer.writerows(
+                [tuple(_defect(r) if f == "defect" else r[f] for f in FIELDS) for r in subset]
+            )
+        written.append((out, len(subset)))
 
+    bad = [r for r in rows if r["any_dict"] or not r["has_log"]]
     if not bad:
         print("\nno defective runs -- nothing written")
         return 0
@@ -190,7 +203,9 @@ def main() -> int:
     # usually perfectly readable, because its defect is the missing log. Sending
     # someone to inspect prose that was never the problem makes the corpus look
     # fine and the parser look wrong.
-    print(f"\ndetail ({len(bad):,} rows, contains se10, gitignored): {out}")
+    print("\ndetail (contains se10, gitignored):")
+    for path, n in written:
+        print(f"  {n:>7,} rows  {path}")
     for label, match in (
         ("prose UNREADABLE (inspect the prose)", lambda r: r["total_fail"]),
         ("OUTPUT-ONLY (prose is fine; the LOG is missing)", lambda r: not r["has_log"]),
