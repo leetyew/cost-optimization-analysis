@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS query_instances (
 );
 CREATE INDEX IF NOT EXISTS ix_qi_call ON query_instances(search_call_id);
 CREATE INDEX IF NOT EXISTS ix_qi_template ON query_instances(template);
+-- Templating matches a query against ONLY its own merchant's ~12 terms, so it
+-- walks the table merchant by merchant. Without this index that walk is a full
+-- scan per merchant -- 19k scans of ~2.4M rows.
+CREATE INDEX IF NOT EXISTS ix_qi_se10 ON query_instances(se10);
 
 CREATE TABLE IF NOT EXISTS output_records (
     id                     INTEGER PRIMARY KEY,

@@ -474,12 +474,51 @@ inert question's answer block is `NULL / Evidence. NULL` — a handful of tokens
 paragraph. And input tokens are ~57% of cost with the search fee at 42.9%, so the
 no-attribution floor is real but is not the headline.
 
-**P3 is the bridge for the rest, and it is now unblocked.** PII-templated query archetypes are
-human-readable (`"what type of building is at <ZIP>"`), so an archetype maps to a question
-by inspection even though the corpus carries no explicit link. That converts "Q22 is inert"
-into "Q22 costs N searches", which is the claim the report actually needs. Label the
-mapping as the human judgement it is — it is the one heuristic worth keeping, and
-invariant 5 requires it be named as such.
+**P3 is the bridge for the rest, and it is BUILT** (`src/coa/normalize.py`, 2026-08-04).
+PII-templated query archetypes are human-readable (`"what type of building is at <ZIP>"`),
+so an archetype maps to a question by inspection even though the corpus carries no explicit
+link. That converts "Q22 is inert" into "Q22 costs N searches", which is the claim the
+report actually needs. Label the mapping as the human judgement it is — it is the one
+heuristic worth keeping, and invariant 5 requires it be named as such.
+
+What is done and what is not:
+
+- **Done, mechanically.** `coa analyze` populates `template` / `n_placeholders` / `archetype`
+  for every `query_instances` row, and the `archetypes` view rolls them up. Verified on
+  fixtures: billed calls partition across the view exactly, so archetype cost shares sum
+  to 100%.
+- **Not done, and it is the deliverable.** The `template -> archetype` map is hand-built by
+  the operator from `coa analyze --export-templates`, and the `archetype -> question` step
+  after it is pure inspection. No dollar figure exists until both happen.
+
+### P3 templating rules that are easy to get wrong
+
+- **`coa analyze` WRITES.** It is the one analysis command that does. `coa reparse` rebuilds
+  `query_instances` from scratch and therefore clears every template, so reparse must always
+  be followed by analyze. Both commands say so at runtime; the silent symptom is an
+  `archetypes` view that has quietly gone empty.
+- **`n_placeholders == 0` is a privacy control, not a statistic.** It means nothing matched,
+  so the template IS the verbatim query text. It gates the head export, and the gate is
+  **necessary but not sufficient** — a template with placeholders can still carry a term
+  that never reached `pii_terms`. `archetype_groups.csv` and `reports/` are gitignored for
+  this reason; treat both as merchant data.
+- **A thin exact-template head has TWO causes with opposite fixes, and `singletons` is what
+  separates them.** Under-masking looks identical to genuine query diversity: a query
+  carrying PII that never reached `pii_terms` stays merchant-specific, so 19,269 merchants
+  produce 19,269 distinct templates. A thin head with MANY singletons means the fix is more
+  `pii_terms` coverage; only a thin head with FEW singletons is a real layer-2 (fuzzy)
+  case. Adding `rapidfuzz` on the raw head figure would paper over a masking gap while
+  leaving the PII unmasked in the export.
+- **Head coverage is vacuous below `HEAD_FOR_COVERAGE` distinct templates.** The fixture
+  corpus has 9, so its `top 9 -> 100%` says nothing; the report labels that case rather
+  than letting it read as success.
+- **Watch `placeholders fired` for a field stuck at 0** while its `pii_terms` bucket is
+  populated. That is the P3-side version of the silent mismatch that blanked 14 merchant
+  columns. On fixtures `street` / `zip` / `owner` read 0 only because `gen_fixtures.
+  queries_for` never builds queries from them — on the real corpus all three must fire.
+- Templating matches **per merchant via `se10`**, never against a global term list, and
+  masks **longest term first** (a street value contains the city value). Both are
+  correctness properties, not optimizations.
 
 ## Stack
 

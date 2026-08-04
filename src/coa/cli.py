@@ -39,6 +39,14 @@ from .metrics import (
     render_open_page_report,
     tier_usage,
 )
+from .normalize import (
+    counters,
+    export_head,
+    render_export_note,
+    render_templating_report,
+    template_queries,
+    templating_picture,
+)
 from .outputs import ingest_output
 from .scorecard import ANSWER_SOURCES, question_scorecard, render_scorecard
 from .weblogs import ingest_weblog, reparse
@@ -55,6 +63,12 @@ SOURCE_KINDS: tuple[tuple[str, str, str, Callable], ...] = (
     ("input", "input", ".jsonl", ingest_input),
     ("output", "output", ".jsonl", ingest_output),
 )
+
+# Filename for the head-template export, and the sentinel meaning "use the
+# default path". The default is `<cfg.reports>/<HEAD_EXPORT_NAME>`, which cannot
+# be built at parser-construction time because the reports dir is configurable.
+HEAD_EXPORT_NAME = "head_templates.csv"
+DEFAULT_HEAD_EXPORT = "<default>"
 
 
 def iter_source_files(root: Path, subdir: str, suffix: str) -> Iterator[tuple[str, Iterable[str]]]:
@@ -352,6 +366,10 @@ def cmd_reparse(args: argparse.Namespace, cfg: Config) -> int:
             f"(clean {stats['conf_clean']}, heuristic {stats['conf_heuristic']}, "
             f"failed {stats['conf_failed']})"
         )
+        # query_instances are derived, so reparse rebuilds them -- which drops
+        # template / n_placeholders / archetype with them. Without this line the
+        # only symptom is an `archetypes` view that has silently gone empty.
+        print("query_instances were rebuilt, so templates are cleared — re-run `coa analyze`")
         return 0
     finally:
         conn.close()
@@ -368,9 +386,41 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
-    """Analysis over ingested tables. Templating and archetypes land in P3."""
+    """Templating, archetypes, cache economics and cost.
+
+    Unlike the other read-only analysis commands this one WRITES: it populates
+    `query_instances.template` / `n_placeholders` / `archetype`. That is what
+    makes it re-runnable after editing `archetype_groups.csv`, and what makes it
+    mandatory after `coa reparse`, which rebuilds those rows from scratch.
+
+    Its anomalies are cleared and rewritten each run, so re-running does not
+    accumulate duplicates in `coa anomalies summary`.
+    """
     conn = connect(cfg.db)
     try:
+        conn.execute("DELETE FROM anomalies WHERE stage = 'analyze'")
+        rec = anom.AnomalyRecorder(
+            conn, "analyze", cfg.anomalies.max_excerpt_chars, cfg.anomalies.max_payload_rows
+        )
+        stats = template_queries(conn, rec, cfg)
+        rec.flush()
+        conn.commit()
+        print(counters(stats.items()))
+        print()
+        print(render_templating_report(templating_picture(conn), cfg))
+
+        if args.export_templates:
+            dest = (
+                cfg.reports / HEAD_EXPORT_NAME
+                if args.export_templates == DEFAULT_HEAD_EXPORT
+                else Path(args.export_templates)
+            )
+            written, withheld = export_head(conn, dest, cfg, include_unmasked=args.include_unmasked)
+            print()
+            print("TEMPLATE EXPORT")
+            print(render_export_note(dest, written, withheld))
+
+        print()
         print(render_cache_report(cache_picture(conn)))
         print()
         print(render_open_page_report(open_page_overlap(conn)))
@@ -432,6 +482,30 @@ def build_parser() -> argparse.ArgumentParser:
     doc.set_defaults(func=cmd_doctor)
 
     ana = sub.add_parser("analyze", help="templating, archetypes, metrics")
+    # nargs="?" so the operator can type the bare flag: they hand-type everything
+    # across the air gap, and the default lands in the gitignored reports/ dir.
+    # `const` is a sentinel rather than a real path because the default lives
+    # under the CONFIGURED reports dir, which is not known until Config.load.
+    #
+    # Deliberately NOT `type=Path`. For nargs="?" argparse runs a string `const`
+    # through `type` as well, which turned the sentinel into `Path("<default>")`
+    # -- it then compared unequal to the sentinel and wrote a file literally named
+    # `<default>`. Keeping this a plain string makes the comparison in
+    # cmd_analyze unambiguous; the Path is built there.
+    ana.add_argument(
+        "--export-templates",
+        nargs="?",
+        const=DEFAULT_HEAD_EXPORT,
+        metavar="PATH",
+        help=f"write the head-template CSV for hand-grouping "
+        f"(default: <reports>/{HEAD_EXPORT_NAME})",
+    )
+    ana.add_argument(
+        "--include-unmasked",
+        action="store_true",
+        help="also export templates with NO placeholder — these are verbatim query "
+        "text and may contain merchant PII",
+    )
     ana.set_defaults(func=cmd_analyze)
 
     sc = sub.add_parser("scorecard", help="per-question rates (the primary deliverable)")

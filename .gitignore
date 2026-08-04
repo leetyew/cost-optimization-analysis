@@ -13,6 +13,11 @@
 /*.sqlite*
 /reports/
 /data/
+# The hand-maintained template -> archetype map. Templates are query text with
+# the PII we managed to match masked out -- which is not the same as PII-free: a
+# merchant value that never reached `pii_terms` survives into the template
+# verbatim, and the operator may add unmasked rows by hand.
+/archetype_groups.csv
 
 # Python
 __pycache__/

@@ -199,6 +199,68 @@ def _label_candidate_lines(values: dict[str, Counter], n: int, seen: set[str]) -
     return out
 
 
+def _templating_lines(conn: sqlite3.Connection, n_rows: int, n_billed: int) -> list[str]:
+    """What P3 templating produced, and whether it has run at all.
+
+    Positive confirmation again: an untemplated DB and a DB whose templating
+    matched nothing both show zeros in every downstream archetype figure, and only
+    the `templated` count tells them apart. `coa reparse` rebuilds
+    `query_instances` and clears templates, so "has not run" is a state a working
+    corpus lands in routinely, not a broken one.
+
+    `unmasked` is the privacy line: those rows' templates are verbatim query text.
+    `placeholders` is the P3-side analogue of `terms by field` — a field that
+    never fires while its pii_terms bucket is populated means templating is not
+    reaching it.
+    """
+    from .normalize import HEAD_FOR_COVERAGE, templating_picture
+
+    if not n_rows:
+        return [_line("(no queries)", "ingest logs/jsonl/ before this block means anything")]
+
+    p = templating_picture(conn)
+    if not p.has_run:
+        return [
+            _line("templated", f"0 of {n_rows:,}   <-- templating has not run"),
+            _line("", "run `coa analyze` (reparse clears templates)"),
+        ]
+
+    out = [
+        _line("templated", f"{p.n_templated:,} of {n_rows:,} query rows"),
+        _line(
+            "unmasked",
+            f"{p.n_unmasked_billed:,} of {n_billed:,} billed "
+            f"({_share(p.n_unmasked_billed, n_billed)}) — template IS the query text",
+        ),
+        _line(
+            "distinct templates",
+            f"{p.n_distinct:,} over billed queries ({p.n_singleton:,} matched exactly one)",
+        ),
+        _line(
+            f"top {p.head_size} cover",
+            f"{_share(p.head_covered, n_billed)} of billed queries",
+        )
+        if p.head_size
+        else _line(f"top {HEAD_FOR_COVERAGE} cover", "n/a"),
+        _line("placeholders", ", ".join(f"{f} {n:,}" for f, n in p.by_field) or "none"),
+    ]
+    if p.n_groups:
+        out.append(
+            _line(
+                "archetypes",
+                f"{p.n_groups:,} mapped, covering {p.n_mapped_billed:,} billed queries "
+                f"({_share(p.n_mapped_billed, n_billed)})",
+            )
+        )
+    else:
+        out.append(_line("archetypes", "none mapped — archetype_groups.csv is absent or empty"))
+    return out
+
+
+def _share(num: int, den: int) -> str:
+    return f"{num / den:.1%}" if den else "n/a"
+
+
 def _answer_source_lines(conn: sqlite3.Connection, n_a: int) -> list[str]:
     """Which of the three parses reached each answer, and where they disagree.
 
@@ -329,6 +391,9 @@ def health_report(conn: sqlite3.Connection) -> str:
     billed = _scalar(conn, "SELECT COUNT(*) FROM query_instances WHERE is_billed_query = 1")
     total_q = _scalar(conn, "SELECT COUNT(*) FROM query_instances")
     out.append(_line("query rows", f"{total_q} ({billed} billed, {total_q - billed} sub-queries)"))
+
+    out += ["", "TEMPLATING"]
+    out += _templating_lines(conn, total_q, billed)
 
     out += ["", "TOKENS / TIER"]
     out.append(
