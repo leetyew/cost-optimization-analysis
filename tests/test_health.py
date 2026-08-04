@@ -213,3 +213,64 @@ def test_high_cardinality_label_values_are_not_printed(conn: sqlite3.Connection)
     out = health_report(conn)
     assert "12 distinct" in out
     assert "case detail 0" not in out
+
+
+def test_prose_unreadable_counts_runs_not_answers(conn: sqlite3.Connection) -> None:
+    """`parsed from` is per ANSWER and cannot see whole runs falling back to the dict.
+
+    1,047 runs where every answer came from `answer_dict` and 50,256 dict answers
+    scattered across many runs give the same per-answer breakdown, but only the
+    first is the population `coa scorecard` excludes from its evidence-dependent
+    rates. The per-run figure is the one that has to be checkable.
+    """
+    conn.execute("INSERT INTO output_records (id, se10, src_file, src_line) VALUES (1,'m','x',1)")
+    conn.executemany(
+        "INSERT INTO answers (se10, output_id, run_id, qnum, answer_text, parsed_from) "
+        "VALUES ('m', 1, ?, ?, '3', ?)",
+        [
+            (0, 1, "answer_dict"),  # run 0: every answer from the dict
+            (0, 2, "answer_dict"),
+            (1, 1, "answers_text"),  # run 1: mixed
+            (1, 2, "answer_dict"),
+            (2, 1, "answers_text"),  # run 2: prose read it all
+            (2, 2, "answers_text"),
+        ],
+    )
+    out = health_report(conn)
+    assert "1 of 3 runs" in out, "one run is all-dict, not two and not six answers"
+    assert "1 part-dict" in out
+
+
+def test_run_reconciliation_reports_both_directions(conn: sqlite3.Connection) -> None:
+    """A run with answers but no log carries no tokens, so every cost is a floor.
+
+    The real corpus has 49,381 log runs against 50,420 output runs; naming which
+    side each orphan sits on is what turns "~1,039 unexplained" into something
+    that can be chased.
+    """
+    conn.execute("INSERT INTO output_records (id, se10, src_file, src_line) VALUES (1,'m','x',1)")
+    conn.executemany(
+        "INSERT INTO answers (se10, output_id, run_id, qnum, answer_text) VALUES ('m',1,?,1,'3')",
+        [(0,), (1,)],  # output knows runs 0 and 1
+    )
+    conn.execute(
+        "INSERT INTO runs (se10, run_id, run_key, src_file, src_line) "
+        "VALUES ('m', 0, 'run_0', 'x', 1)"  # ...logs know only run 0
+    )
+    out = health_report(conn)
+    assert "1 / 2 —" in out
+    assert "1 output-only" in out
+    assert "cost is a FLOOR" in out
+    assert "0 log-only" in out
+
+
+def test_run_reconciliation_is_quiet_when_the_sides_agree(conn: sqlite3.Connection) -> None:
+    """The line must be evidence of a real gap, not permanent noise."""
+    conn.execute("INSERT INTO output_records (id, se10, src_file, src_line) VALUES (1,'m','x',1)")
+    conn.execute(
+        "INSERT INTO answers (se10, output_id, run_id, qnum, answer_text) VALUES ('m',1,0,1,'3')"
+    )
+    conn.execute(
+        "INSERT INTO runs (se10, run_id, run_key, src_file, src_line) VALUES ('m',0,'run_0','x',1)"
+    )
+    assert "identical run sets" in health_report(conn)

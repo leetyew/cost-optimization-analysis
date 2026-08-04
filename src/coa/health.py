@@ -261,6 +261,81 @@ def _share(num: int, den: int) -> str:
     return f"{num / den:.1%}" if den else "n/a"
 
 
+def _prose_readable_lines(conn: sqlite3.Connection) -> list[str]:
+    """Runs whose prose the block regex could not read, counted per RUN.
+
+    `parsed from` above is per ANSWER, which cannot distinguish 1,047 whole runs
+    falling back to `answer_dict` from the same number of answers scattered across
+    many runs. Only the per-run figure does, and it is the population `coa
+    scorecard` excludes from its evidence-dependent rates — so it has to be
+    checkable without re-deriving it in ad-hoc SQL every ingest.
+
+    `partial` is reported beside it because nothing else counts it: a run where the
+    regex read 40 of 48 answers is a different defect from one it could not read at
+    all, and only the total-failure runs are currently excluded anywhere.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n_runs, "
+        "       COALESCE(SUM(n_dict = n_all), 0) AS total_fail, "
+        "       COALESCE(SUM(n_dict > 0 AND n_dict < n_all), 0) AS partial "
+        "FROM (SELECT COUNT(*) AS n_all, SUM(parsed_from = 'answer_dict') AS n_dict "
+        "      FROM answers WHERE run_id IS NOT NULL GROUP BY output_id, run_id)"
+    ).fetchone()
+    if not row or not row["n_runs"]:
+        return [_line("prose-unreadable", "no runs with answers to check")]
+    # One line, not two: doctor's one-screen budget is a hard constraint, and the
+    # partial count only ever needs to be read beside the total-failure one.
+    return [
+        _line(
+            "prose-unreadable",
+            f"{row['total_fail']:,} of {row['n_runs']:,} runs "
+            f"({_share(row['total_fail'], row['n_runs'])}) all-dict, "
+            f"{row['partial']:,} part-dict",
+        )
+    ]
+
+
+def _run_reconciliation_lines(conn: sqlite3.Connection) -> list[str]:
+    """Do `logs/jsonl/` and `output/` agree on which runs exist?
+
+    They do not on the real corpus — 49,381 log runs against 50,420 output runs —
+    and the gap matters twice over. Cost lives on the log side, so a run with
+    answers but no log contributes no tokens and every cost figure is a floor. And
+    the ~1,039 gap sits suspiciously close to the count of prose-unreadable runs
+    without matching it, which is a question only an exact partition can close.
+
+    Compared on `(se10, run_id)`. A duplicated se10 stored as two output records
+    collapses to one here on purpose: the log side is keyed by se10 and knows
+    nothing of the duplicate, so counting it twice would invent a mismatch.
+    """
+    row = conn.execute(
+        """
+        WITH log_runs AS (
+            SELECT DISTINCT se10, run_id FROM runs WHERE run_id IS NOT NULL
+        ), out_runs AS (
+            SELECT DISTINCT o.se10 AS se10, a.run_id AS run_id
+            FROM answers a JOIN output_records o ON o.id = a.output_id
+            WHERE a.run_id IS NOT NULL
+        )
+        SELECT (SELECT COUNT(*) FROM log_runs) AS n_log,
+               (SELECT COUNT(*) FROM out_runs) AS n_out,
+               (SELECT COUNT(*) FROM out_runs o WHERE NOT EXISTS
+                   (SELECT 1 FROM log_runs l
+                    WHERE l.se10 = o.se10 AND l.run_id = o.run_id)) AS out_only,
+               (SELECT COUNT(*) FROM log_runs l WHERE NOT EXISTS
+                   (SELECT 1 FROM out_runs o
+                    WHERE o.se10 = l.se10 AND o.run_id = l.run_id)) AS log_only
+        """
+    ).fetchone()
+    detail = (
+        f"{row['out_only']:,} output-only (answers, NO tokens — cost is a FLOOR), "
+        f"{row['log_only']:,} log-only"
+        if row["out_only"] or row["log_only"]
+        else "identical run sets"
+    )
+    return [_line("runs log vs output", f"{row['n_log']:,} / {row['n_out']:,} — {detail}")]
+
+
 def _answer_source_lines(conn: sqlite3.Connection, n_a: int) -> list[str]:
     """Which of the three parses reached each answer, and where they disagree.
 
@@ -362,6 +437,7 @@ def health_report(conn: sqlite3.Connection) -> str:
     )
     out.append(_line("runs", _scalar(conn, "SELECT COUNT(*) FROM runs")))
     out.append(_line("output records", _scalar(conn, "SELECT COUNT(*) FROM output_records")))
+    out += _run_reconciliation_lines(conn)
     out.append(_line("pii terms", _scalar(conn, "SELECT COUNT(*) FROM pii_terms")))
 
     out += ["", "INPUT SCHEMA / PII"]
@@ -426,6 +502,7 @@ def health_report(conn: sqlite3.Connection) -> str:
                 "parsed from",
             )
         )
+        out += _prose_readable_lines(conn)
         # The three Evidence renderings. Classified by the `answer_facts` view so
         # this and the scorecard cannot drift apart — a second definition of
         # "no evidence" is precisely how `evidence_text IS NULL` came to be
