@@ -396,10 +396,17 @@ class MaskingDiagnostic:
     n_unmasked: int
     n_near_miss: int
     near_miss_by_field: list[tuple[str, int]]
+    n_masked: int
+    n_residual: int
+    residual_by_field: list[tuple[str, int]]
 
     @property
     def near_miss_rate(self) -> float | None:
         return self.n_near_miss / self.n_unmasked if self.n_unmasked else None
+
+    @property
+    def residual_rate(self) -> float | None:
+        return self.n_residual / self.n_masked if self.n_masked else None
 
 
 # A PII value's individual words, for near-miss detection. Four chars rather than
@@ -418,11 +425,21 @@ def masking_diagnostic(conn: sqlite3.Connection) -> MaskingDiagnostic:
     it collapses with nothing. Comparing queries against distinct templates inside
     each bucket answers it without reading a single query.
 
-    The near-miss pass then localizes the fix: does an unmasked query contain a
-    WORD from one of its own merchant's `pii_terms` values? A hit means the value
-    is there in a form the whole-value substring match could not see — `Acme
-    Widgets` against a stored `acme widgets llc` — which is a `pii_terms` variant
-    to add, not a generic query.
+    The word pass then localizes the fix, over BOTH populations, because a
+    template can stay merchant-specific two different ways:
+
+    * **near miss** -- an unmasked query containing a WORD from its own
+      merchant's `pii_terms`. The value is there in a form the whole-value
+      substring match could not see (`Acme Widgets` against a stored `acme
+      widgets llc`), so it is a variant to add, not a generic query.
+    * **residual** -- a query that DID mask something and still carries a PII
+      word. One field matched and another did not, so the template is masked yet
+      still unique to its merchant.
+
+    Checking only the unmasked half would miss the second entirely: on the real
+    corpus 183,704 billed queries are unmasked while 280,987 templates are
+    singletons, so up to ~97k singletons are masked-but-still-merchant-specific
+    and invisible to a diagnostic that stops at `n_placeholders = 0`.
     """
     by_kind = [
         (r["kind"], r["queries"], r["templates"])
@@ -437,7 +454,8 @@ def masking_diagnostic(conn: sqlite3.Connection) -> MaskingDiagnostic:
     # Walked merchant by merchant, like the templating pass itself, so a query is
     # only ever compared against its own merchant's words.
     near_miss: Counter = Counter()
-    n_unmasked = n_near_miss = 0
+    residual: Counter = Counter()
+    n_unmasked = n_near_miss = n_masked = n_residual = 0
     for se10 in [r[0] for r in conn.execute("SELECT DISTINCT se10 FROM query_instances")]:
         words: dict[str, set[str]] = {}
         for r in conn.execute("SELECT field, value_norm FROM pii_terms WHERE se10 = ?", (se10,)):
@@ -447,23 +465,38 @@ def masking_diagnostic(conn: sqlite3.Connection) -> MaskingDiagnostic:
         if not words:
             continue
         for row in conn.execute(
-            "SELECT template FROM query_instances "
-            "WHERE se10 IS ? AND is_billed_query = 1 AND n_placeholders = 0",
+            "SELECT template, n_placeholders FROM query_instances "
+            "WHERE se10 IS ? AND is_billed_query = 1 AND template IS NOT NULL",
             (se10,),
         ).fetchall():
-            n_unmasked += 1
             hit = {f for word, fields in words.items() if word in row["template"] for f in fields}
-            if hit:
-                n_near_miss += 1
-                for field in hit:
-                    near_miss[field] += 1
+            if row["n_placeholders"]:
+                n_masked += 1
+                if hit:
+                    n_residual += 1
+                    for field in hit:
+                        residual[field] += 1
+            else:
+                n_unmasked += 1
+                if hit:
+                    n_near_miss += 1
+                    for field in hit:
+                        near_miss[field] += 1
 
     return MaskingDiagnostic(
         by_kind=by_kind,
         n_unmasked=n_unmasked,
         n_near_miss=n_near_miss,
-        near_miss_by_field=sorted(near_miss.items(), key=lambda kv: (-kv[1], kv[0])),
+        near_miss_by_field=_by_count(near_miss),
+        n_masked=n_masked,
+        n_residual=n_residual,
+        residual_by_field=_by_count(residual),
     )
+
+
+def _by_count(counts: Counter) -> list[tuple[str, int]]:
+    """Field tallies, largest first, ties broken by name so output is stable."""
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 def render_masking_diagnostic(d: MaskingDiagnostic) -> str:
@@ -483,24 +516,35 @@ def render_masking_diagnostic(d: MaskingDiagnostic) -> str:
         "    q/template runs high. PII we missed is unique per merchant and sits near 1.0.",
         "",
     ]
-    if not d.n_unmasked:
-        out.append("  near-miss          (no unmasked queries to check)")
-        return "\n".join(out)
-
-    out.append(
-        f"  near-miss          {d.n_near_miss:,} of {d.n_unmasked:,} unmasked queries "
-        f"({d.near_miss_rate:.1%})"
-    )
-    if d.near_miss_by_field:
+    if d.n_unmasked:
         out.append(
-            "    by field         " + ", ".join(f"{f} {n:,}" for f, n in d.near_miss_by_field)
+            f"  near-miss          {d.n_near_miss:,} of {d.n_unmasked:,} unmasked "
+            f"({d.near_miss_rate:.1%}) carry a PII word anyway"
         )
+        if d.near_miss_by_field:
+            out.append(
+                "    by field         " + ", ".join(f"{f} {n:,}" for f, n in d.near_miss_by_field)
+            )
+    if d.n_masked:
+        out.append(
+            f"  residual           {d.n_residual:,} of {d.n_masked:,} masked "
+            f"({d.residual_rate:.1%}) still carry a PII word"
+        )
+        if d.residual_by_field:
+            out.append(
+                "    by field         " + ", ".join(f"{f} {n:,}" for f, n in d.residual_by_field)
+            )
+    if not (d.n_unmasked or d.n_masked):
+        return "\n".join(out + ["  (no billed queries to check)"])
+
     out += [
-        "    A near miss contains a WORD from its own merchant's pii_terms while matching",
-        "    no whole value — `Acme Widgets` against a stored `acme widgets llc`. Those are",
-        "    pii_terms variants to add, NOT generic queries.",
+        "    Both count a query holding a WORD from its own merchant's pii_terms while no",
+        "    whole value matched — `Acme Widgets` against a stored `acme widgets llc`. A",
+        "    NEAR-MISS masked nothing at all; a RESIDUAL masked one field and missed another,",
+        "    so its template looks masked yet is still unique to that merchant. Both are",
+        "    pii_terms variants to add, and together they explain a singleton-heavy head.",
         "    HEURISTIC: a 4+ char word can collide by chance (`blue` from `Blue Harbor` also",
-        "    matches `blue book value`), so read this as an UPPER bound on the miss rate.",
+        "    matches `blue book value`), so read both as an UPPER bound.",
     ]
     return "\n".join(out)
 

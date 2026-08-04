@@ -28,6 +28,7 @@ from coa.normalize import (
     export_head,
     load_archetype_groups,
     masking_diagnostic,
+    render_masking_diagnostic,
     template_queries,
     templating_picture,
 )
@@ -436,3 +437,31 @@ def test_generic_queries_collapse_and_missed_pii_does_not(corpus, tmp_path) -> N
     q_unmasked, t_unmasked = by_kind["unmasked"]
     assert q_unmasked / t_unmasked > 5, "generic queries must collapse"
     assert d.n_near_miss == 0, "fixture masking is complete, so nothing should near-miss"
+
+
+def test_residual_catches_a_masked_query_that_is_still_merchant_specific(
+    bare_db: sqlite3.Connection, tmp_path
+) -> None:
+    """The population a `n_placeholders = 0` diagnostic cannot see.
+
+    On the real corpus 183,704 billed queries are unmasked but 280,987 templates
+    are singletons, so up to ~97k are masked-yet-unique: one field matched and
+    another did not. Those never appear in the unmasked bucket, and stopping at
+    near-miss would have declared the masking healthy while a third of the
+    singleton tail went unexplained.
+    """
+    bare_db.executemany(
+        "INSERT INTO pii_terms (se10, field, value_norm) VALUES ('9999999999', ?, ?)",
+        [("city", "springfield"), ("name", "acme widgets llc")],
+    )
+    # `springfield` masks; `Acme Widgets` does not (stored value carries `llc`),
+    # so the template is masked AND still unique to this merchant.
+    _query_row(bare_db, "9999999999", "Acme Widgets Springfield reviews")
+    rec = anom.AnomalyRecorder(bare_db, "analyze")
+    template_queries(bare_db, rec, Config(archetype_groups=tmp_path / "absent.csv"))
+
+    d = masking_diagnostic(bare_db)
+    assert d.n_unmasked == 0, "the query masked something, so it is not in the unmasked bucket"
+    assert (d.n_masked, d.n_residual) == (1, 1)
+    assert d.residual_by_field == [("name", 1)]
+    assert "residual" in render_masking_diagnostic(d)
