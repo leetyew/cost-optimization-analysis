@@ -55,6 +55,28 @@ ANSWER_BLOCK_RE = re.compile(
     re.S,
 )
 
+# A SECOND prose shape, operator-confirmed 2026-08-04. Some runs omit the `Q<n>.`
+# echo entirely and separate answers with a single newline rather than a blank line:
+#
+#     A1. 5
+#     A2. NULL
+#     A3. 3
+#
+# `ANSWER_BLOCK_RE` requires the question echo, so it matched ZERO blocks on these
+# and every answer fell back to `answer_dict` -- which is what the 1,047
+# "prose-unreadable" runs actually are. They are a format difference, not a parse
+# failure, and calling them unreadable charged their pipeline for our assumption.
+#
+# Evidence stays optional here for the same reason it is optional above: whether
+# this shape ever carries an Evidence line is exactly what the ingest counters now
+# measure rather than assume.
+BARE_ANSWER_RE = re.compile(
+    r"^A(\d+)\.[ \t]*(.*?)"
+    r"(?:\n+Evidence[.:]?[ \t]*(.*?))?"
+    r"(?=\n\s*A\d+\.|\Z)",
+    re.S | re.M,
+)
+
 # Markdown link wrapped in its own parens, including the observed empty `([]())`.
 PROSE_CITATION_RE = re.compile(r"\(\[([^\]]*)\]\(([^)]*)\)\)")
 
@@ -98,6 +120,11 @@ class AnswerBlock:
     answer: str
     evidence: str | None
     evidence_start: int | None
+    # Which prose shape produced this block. Carried per block rather than per run
+    # so `parsed_from` can distinguish them downstream: a bare block's missing
+    # Evidence line may be structural to the format rather than a finding about
+    # the search, and scoring the two identically would inflate the headline.
+    shape: str = "q_echo"
 
 
 @dataclass(frozen=True)
@@ -157,9 +184,25 @@ def extract_questions(user_prompt: str) -> dict[int, str]:
 
 
 def parse_answer_blocks(text: str) -> list[AnswerBlock]:
-    """Parse one run's answer prose into blocks, tolerating all Evidence shapes."""
+    """Parse one run's answer prose, tolerating both known shapes.
+
+    The `Q<n>.`-echo shape is tried first and the bare `A<n>.` shape only if it
+    yields nothing, so a run carrying question echoes can never be re-read by the
+    looser pattern -- which would match the same answers with worse boundaries.
+
+    Falling back rather than alternating is deliberate. The bare pattern is
+    strictly more permissive, so running it everywhere would silently change how
+    already-working runs parse; running it only where the strict one found nothing
+    keeps every currently-parsed run byte-identical.
+    """
+    blocks = _blocks_from(ANSWER_BLOCK_RE, text, "q_echo")
+    return blocks or _blocks_from(BARE_ANSWER_RE, text, "bare")
+
+
+def _blocks_from(pattern: re.Pattern, text: str, shape: str) -> list[AnswerBlock]:
+    """Every block one pattern finds. Group 3 is the optional Evidence text."""
     blocks = []
-    for m in ANSWER_BLOCK_RE.finditer(text or ""):
+    for m in pattern.finditer(text or ""):
         evidence = m.group(3)
         blocks.append(
             AnswerBlock(
@@ -167,6 +210,7 @@ def parse_answer_blocks(text: str) -> list[AnswerBlock]:
                 answer=(m.group(2) or "").strip(),
                 evidence=evidence,
                 evidence_start=None if evidence is None else m.start(3),
+                shape=shape,
             )
         )
     return blocks
@@ -664,6 +708,12 @@ def _store_run(
     for block in blocks:
         ctx.stats[evidence_shape(block.evidence)] += 1
         ctx.stats["out_answer_blocks"] += 1
+        # Counted per shape as well as overall. Whether the bare shape ever carries
+        # an Evidence line decides whether its answers may enter the default-3
+        # denominator, and that is a question for the corpus, not an assumption.
+        ctx.stats[f"out_block_{block.shape}"] += 1
+        if block.shape != "q_echo" and evidence_shape(block.evidence) == "evidence_present":
+            ctx.stats["out_bare_with_evidence"] += 1
         mine = block.answer
         agree: int | None = None
         if block.qnum in theirs:
@@ -675,7 +725,13 @@ def _store_run(
                 block.qnum,
                 mine,
                 None if block.evidence is None else block.evidence.strip(),
-                "answers_text",
+                # A distinct provenance, NOT "answers_text". `_EVIDENCE_OBSERVABLE`
+                # in the scorecard keys off that value, so folding the bare shape
+                # into it would silently admit ~1,047 runs to the default-3
+                # denominator on the assumption that their missing Evidence line is
+                # a finding rather than a property of the format. It stays out
+                # until the counters above show whether the shape carries evidence.
+                "answers_text" if block.shape == "q_echo" else "answers_text_bare",
                 agree,
             )
         )

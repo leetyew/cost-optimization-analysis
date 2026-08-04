@@ -561,3 +561,54 @@ def test_plural_answers_key_is_not_read(conn: sqlite3.Connection) -> None:
     assert stats["out_answer_blocks"] == 0
     sources = {a["parsed_from"] for a in rows(conn, "answers")}
     assert "answers_text" not in sources
+
+
+# ---------------------------------------------------------------------------
+# The second prose shape (operator-confirmed 2026-08-04)
+# ---------------------------------------------------------------------------
+
+_Q_ECHO = "Q1. question text\nA1. 5\nEvidence. NULL\n\nQ2. question text\nA2. 2\nEvidence. seen"
+# Some runs omit the question echo and separate answers with a single newline.
+# This is what the 1,047 "prose-unreadable" runs actually contain.
+_BARE = "A1. 5\nA2. NULL\nA3. 3"
+
+
+def test_bare_answer_shape_parses() -> None:
+    """The shape that used to yield zero blocks and send a whole run to answer_dict."""
+    blocks = parse_answer_blocks(_BARE)
+    assert [b.qnum for b in blocks] == [1, 2, 3]
+    assert [b.answer for b in blocks] == ["5", "NULL", "3"]
+    assert {b.shape for b in blocks} == {"bare"}
+
+
+def test_bare_shape_still_reads_evidence_when_present() -> None:
+    """Whether this shape ever carries Evidence is measured, not assumed.
+
+    If it does, those answers are evidence-observable and belong in the default-3
+    denominator; the parser must not foreclose that by ignoring the line.
+    """
+    blocks = parse_answer_blocks("A1. 3\nEvidence. adverse media found\nA2. 5")
+    assert blocks[0].evidence == "adverse media found"
+    assert blocks[1].evidence is None
+
+
+def test_q_echo_shape_is_never_reparsed_by_the_looser_pattern() -> None:
+    """Fallback, not alternation: a working run must parse byte-identically.
+
+    The bare pattern is strictly more permissive, so applying it everywhere would
+    silently change the boundaries of runs that already parse correctly.
+    """
+    blocks = parse_answer_blocks(_Q_ECHO)
+    assert {b.shape for b in blocks} == {"q_echo"}
+    assert [b.answer for b in blocks] == ["5", "2"]
+    assert blocks[1].evidence == "seen"
+
+
+def test_genuinely_unparseable_prose_still_yields_nothing() -> None:
+    """Tolerating a second shape must not make the parser tolerate corruption.
+
+    The fixture's planted failure prefixes each answer line, which neither shape
+    may match — otherwise the answer_dict backstop would stop being exercised.
+    """
+    assert parse_answer_blocks(_Q_ECHO.replace("\nA", "\n>>A")) == []
+    assert parse_answer_blocks(_BARE.replace("A", ">>A")) == []
