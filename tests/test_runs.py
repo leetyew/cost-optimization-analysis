@@ -355,3 +355,23 @@ def test_record_count_is_not_derived_by_dividing_by_question_count(
     assert "3-run cases        3 (record, question) pairs" in out
     assert "over 2 records" in out, "2 records, not 3//2 = 1"
     assert "not every record answers all" in out
+
+
+def test_population_check_counts_every_bucket_at_three_or_more(db: sqlite3.Connection) -> None:
+    """A 4-run merchant belongs in the log-side 3+ total, not a separate bucket.
+
+    `n_records` counts records with >= 3 runs, so the log side must be summed the
+    same way. Taking only the exactly-3 bucket compares different definitions and
+    invents a gap. The real corpus tops out at 3 runs, which would have hidden this
+    until a corpus with four did not.
+    """
+    for output_id, (se10, n) in enumerate([("a", 3), ("b", 4)], start=1):
+        _record(db, output_id)
+        _answers(db, output_id, 1, ["4"] * n)
+        for run_id in range(n):
+            _run(db, se10, run_id)
+
+    assert run_count_distribution(db) == [(3, 1), (4, 1)]
+    # Both records have >= 3 runs on both sides, so there is no gap to report.
+    out = render_third_run(third_run_picture(db, PROSE), run_count_distribution(db))
+    assert "POPULATION" not in out

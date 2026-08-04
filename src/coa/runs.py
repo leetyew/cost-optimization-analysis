@@ -453,7 +453,10 @@ def render_third_run(
         ),
     ]
     # The populations behind the cost block above and this one are not the same.
-    log_three = next((m for n, m in (dist or []) if n >= 3), 0)
+    # SUM every bucket at 3-or-more, not the first one. `n_records` counts records
+    # with >= 3 runs, so taking only the exactly-3 bucket would compare different
+    # definitions and report a phantom gap the moment a merchant has four runs.
+    log_three = sum(m for n, m in (dist or []) if n >= 3)
     if dist and log_three != n_records:
         out += [
             f"  POPULATION         {n_records:,} records here (from output/) vs "
