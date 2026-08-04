@@ -27,10 +27,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-from coa.config import Config  # noqa: E402
-from coa.db import connect  # noqa: E402
+from coa.config import Config
+from coa.db import connect
 
 # One pass over `answers` yields both populations: `HAVING n_dict > 0` catches any
 # run the prose parse missed part of, and `total_fail` marks the subset it missed

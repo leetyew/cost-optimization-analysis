@@ -627,6 +627,30 @@ What is done and what is not:
   deliberately deferred behind measurements, not forgotten.
 - Layout: `src/coa/{config,anomalies,db,weblogs,outputs,inputs,normalize,metrics,report,cli}.py`
 
+## `scripts/` vs a `coa` subcommand
+
+Both exist; the boundary is what the output is FOR, not how big the code is.
+
+| | goes in `coa` (doctor / subcommand) | goes in `scripts/` |
+|---|---|---|
+| asked | every ingest, or more than twice | once, about one specific discrepancy |
+| output | numbers the operator relays back | an artifact they inspect locally |
+| lifetime | permanent, tested | may be deleted once the question closes |
+
+`coa doctor` remains the diagnostic surface: **if the answer is a number that
+crosses the air gap, it belongs there**, because a figure worth asking for once is
+worth having on every ingest. A script that starts getting run every time has
+graduated — move its counts into doctor and leave the artifact-writing behind.
+
+Two rules that keep `scripts/` from becoming a graveyard:
+
+- **Never a `sys.path` hack.** The package is installed editable, so
+  `from coa.db import connect` just works; inserting a path forces `# noqa: E402`
+  on every import and is pure debt. (`find_unparsed_runs.py` shipped with one.)
+- **Split output by what may cross the air gap**, exactly as the head-template
+  export does: safe counts to stdout, anything carrying `se10` or query text to a
+  file under the gitignored `reports/`.
+
 ## Architectural rules
 
 - **Parsers take `(src_name, lines_iterable)` — never a path.** `cli.py` owns all path and
