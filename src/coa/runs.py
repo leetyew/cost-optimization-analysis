@@ -126,9 +126,15 @@ def usage_by_run(conn: sqlite3.Connection) -> list[RunSlice]:
     Both columns exist and they diverge exactly when `run_pk` failed to resolve
     (a DUP_RUN whose lookup missed): the call still carries its own run index, so
     grouping on the call's copy keeps it in the run slice it actually belongs to
-    instead of dumping it in `unparsed`. Its tier still comes from the run row, so
-    such a call lands under `<unset>` and is reported as unpriced rather than
-    silently costed at standard.
+    instead of dumping it in `unparsed`.
+
+    Its tier, though, comes from the run row it could not reach, so it lands under
+    `<unset>` -- and `Pricing.for_tier(None)` costs that at STANDARD, deliberately,
+    on the documented inference that an absent tier means the API default was used.
+    So such a call is costed, not dropped and not reported unpriced. That is the
+    right default here for the same reason it is in `tier_usage`: a billed call
+    vanishing from a cost figure understates it, and understating is the wrong
+    direction when the argument is that runs can be cut.
     """
     runs = {
         (r["run_id"], r["tier"]): r

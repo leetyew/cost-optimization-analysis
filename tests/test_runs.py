@@ -281,3 +281,27 @@ def test_saving_share_is_shown_when_everything_is_priced(db: sqlite3.Connection)
 
     out = render_run_economics(usage_by_run(db), run_count_distribution(db), PRICED)
     assert "of total)" in out
+
+
+def test_orphan_call_keeps_its_own_run_index(db: sqlite3.Connection) -> None:
+    """Bucketing on `search_calls.run_id`, not the joined `runs.run_id`.
+
+    The two diverge exactly when `run_pk` failed to resolve. Grouping on the
+    joined column would drop such a call into `unparsed`, understating the run it
+    actually belongs to — and the cost of a marginal run is the whole argument.
+    Its tier comes from the run row it could not reach, so it lands under
+    `<unset>` and is costed at standard — the documented inference for an
+    absent tier, and the safe direction for a cost figure.
+    """
+    _run(db, "1", 2)
+    _call(db, "1", None, 2)  # run_pk unresolved, but the call knows its index
+
+    by_id = {s.run_id: s for s in usage_by_run(db)}
+    assert 2 in by_id and by_id[2].n_calls == 1, "call must land in run_2, not `unparsed`"
+    assert None not in by_id
+    assert "<unset>" in {u.tier for u in by_id[2].by_tier}
+    # `<unset>` costs at STANDARD by design (Pricing.for_tier(None)): absent means
+    # the API default was used. So the orphan is costed, never dropped — the same
+    # direction `tier_usage` errs in, because a billed call missing from a cost
+    # figure understates it.
+    assert by_id[2].cost(PRICED) is not None
