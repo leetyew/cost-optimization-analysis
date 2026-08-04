@@ -166,9 +166,23 @@ def main() -> int:
     # `src_line` is 1-based so it feeds sed directly.
     # `src_file` is stored relative to data_root, so the hint has to rejoin it or
     # the path it prints will not open.
-    first = bad[0]
+    #
+    # ONE POINTER PER DEFECT, not one for the list. The rows are ordered log-side
+    # first, so a single pointer lands on an OUTPUT-ONLY run -- whose prose is
+    # usually perfectly readable, because its defect is the missing log. Sending
+    # someone to inspect prose that was never the problem makes the corpus look
+    # fine and the parser look wrong.
     print(f"\ndetail ({len(bad):,} rows, contains se10, gitignored): {out}")
-    print(f"read one: sed -n '{first['src_line']}p' {cfg.data_root / first['src_file']}")
+    for label, match in (
+        ("prose UNREADABLE (inspect the prose)", lambda r: r["total_fail"]),
+        ("OUTPUT-ONLY (prose is fine; the LOG is missing)", lambda r: not r["has_log"]),
+    ):
+        row = next((r for r in bad if match(r)), None)
+        if row is None:
+            print(f"  {label}: none in this corpus")
+            continue
+        path = cfg.data_root / row["src_file"]
+        print(f"  {label}:\n    sed -n '{row['src_line']}p' {path}")
     return 0
 
 
