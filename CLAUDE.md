@@ -449,6 +449,72 @@ treats it as a finding. Caveat for the `mixed` rows only: exact-normalized-strin
 agreement is harsh on free text, where two runs can both be right and phrased
 differently. Q1 has no such excuse.
 
+## The first real templating run (operator-relayed 2026-08-04)
+
+| Measure | Real corpus |
+|---|---|
+| query rows templated | 2,397,736 of 2,397,736 (**592,710 billed**) |
+| unmasked (`n_placeholders = 0`) | **183,704 billed (31.0%)**, 775,190 overall |
+| placeholders fired | name 182,030, city 96,932, email 89,346, street 68,915, zip 51,617, phone 31,859, owner 11,129 |
+| distinct templates (billed) | **315,717** |
+| singletons | **280,987** — 89% of templates, 47% of billed queries |
+| top-100 coverage | 21.6% |
+| archetypes mapped | none — `archetype_groups.csv` not built yet |
+
+**All seven placeholder fields fire**, so the 29-key remap holds and the
+field-stuck-at-zero failure did not recur.
+
+### The head is thin AND singleton-dominated: this is UNDER-MASKING, not diversity
+
+The pre-registered rule above fired exactly as written, which is what makes it
+usable as evidence rather than as a post-hoc story. **Do not add `rapidfuzz`.**
+Layer 2 would merge near-identical templates; it cannot merge templates that are
+still merchant-specific because the PII in them was never recognised.
+
+Corroborating arithmetic, independent of the singleton count: a top-100 template
+averages ~1,280 billed queries against **19,269 merchants**. A genuinely shared
+archetype ("`<NAME>` scam") should approach one per merchant per run. Capturing
+~6.6% of the merchants that ought to share it means the other ~93% of those same
+queries are sitting in the singleton tail under a merchant-specific template.
+
+The fix is `pii_terms` coverage, and the diagnosis has to happen **locally** —
+singleton templates are verbatim or near-verbatim query text and must not cross
+the air gap. Only the *shape* of what is left unmasked comes back.
+
+### Cache: input is ~24x the prompt per run, and 90% of it is billed at full rate
+
+| Measure | Real corpus |
+|---|---|
+| input tokens | **2,525,321,998** |
+| read from cache | 257,767,808 (**10.2%**) |
+| run_0 / run_1 / run_2 | 19,269 / 19,169 / 10,943 runs; 8% / 11.7% / 11.4% cached |
+| shared cross-merchant prefix | **32 chars (~8 tokens), 0.4%** of a prompt |
+
+Two things follow, and they are not the same size:
+
+- **Cross-merchant caching is confirmed dead**, exactly as predicted — 8 tokens
+  against a 1024-token floor with no partial credit. Do not report it as waste.
+- **The re-send is the lever.** 2,525,321,998 / 49,381 runs = ~51,139 input
+  tokens per run against a ~2,150-token prompt (8,602 chars): a ratio of ~**24x**,
+  consistent with the 48-question prompt being re-sent on each of the ~14 tool
+  calls in a run. At 10.2% cached, nearly all of that repetition bills at the
+  full input rate. **The ~24x is an INFERENCE about their agent loop, not a
+  measurement** — `usage_metadata` is per run, not per API call — and any report
+  using it must say so. What IS measured is the ratio and the hit rate.
+
+### Real run distribution
+
+run_0 19,269 / run_1 19,169 / run_2 10,943 = **49,381 log runs, 2.56 per
+merchant**: 100 merchants with 1 run, 8,226 with 2, 10,943 with 3. Cutting to 2
+removes 10,943 runs (**22.2%**).
+
+Log runs (49,381) and output runs (50,420) differ by 1,039 — close to the 1,047
+prose-unreadable runs but **not equal**, so it is a lead, not a conclusion.
+
+`citation <-> open_page` overlap is **13.9%** (23,910 of 171,860 cited URLs), so
+most cited pages were never opened and open_page cannot carry citation
+attribution. It measures the value of page opens only.
+
 ### The run-count lever (`coa runs`, added 2026-08-04)
 
 Cost scales with runs and needs **no attribution**, which makes it the one large lever not
