@@ -573,6 +573,46 @@ inert question's answer block is `NULL / Evidence. NULL` — a handful of tokens
 paragraph. And input tokens are ~57% of cost with the search fee at 42.9%, so the
 no-attribution floor is real but is not the headline.
 
+### SUPERSEDED 2026-08-04: attribution goes per-run, not through archetypes
+
+The plan below routes attribution through archetypes: collapse queries into a small
+labelled set, then hand-map each archetype to a question. **That path is blocked,
+and the blocker is measured, not suspected.** The real corpus produced **315,717
+distinct templates, 89% of them singletons**, with the top 100 covering 21.6% of
+billed queries. Nobody hand-labels 315k templates, and labelling the head would
+attribute a fifth of the cost.
+
+**The replacement matches queries to questions per `(se10, run_id)`, directly.**
+`output_records.question_user_prompt` stores each merchant's own 48 questions with
+their values inlined, and `search_calls` gives that merchant's queries keyed by
+run. Both join on `se10`, so nothing new needs ingesting. Within one merchant the
+inlined values are highly discriminating — a query containing `60000` points at the
+question containing `60000` — and that is signal masking would collapse to `<ZIP>`
+on both sides.
+
+Three consequences:
+
+- **It is immune to the singleton problem.** It does not care whether templates
+  collapse at all, which is exactly what has gone wrong.
+- **It deletes the hand-mapping step**, which was the one part of the deliverable
+  requiring human labour per archetype. PLAN.md §6.4 already called an empirical
+  affinity matrix "the empirical replacement for a hand-made mapping"; this is that,
+  scored on raw text rather than on templates.
+- **It is still a heuristic** — the model does not emit one query per question. It
+  ships with a confidence score, a threshold below which a query is reported
+  UNATTRIBUTED rather than forced, and invariant 5's label.
+
+**Masking is not obsolete**, it is off the critical path. It keeps two jobs: the
+export gate (a template is what may safely leave the environment) and the
+*consolidation* argument — "these two questions provoke the same search, merge
+them". Do NOT build `archetype_groups.csv` by hand; it is superseded.
+
+**Blocker before building it:** `gen_fixtures.queries_for` invents queries from
+name/city/phone/email independently of the question text, so the fixture has no
+true query→question correspondence and cannot validate accuracy — only that the
+code runs. The generator has to derive queries from questions first, or the
+attribution number ships with no regression test behind it.
+
 **P3 is the bridge for the rest, and it is BUILT** (`src/coa/normalize.py`, 2026-08-04).
 PII-templated query archetypes are human-readable (`"what type of building is at <ZIP>"`),
 so an archetype maps to a question by inspection even though the corpus carries no explicit
