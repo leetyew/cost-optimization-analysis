@@ -405,8 +405,20 @@ def render_run_economics(
     return "\n".join(out)
 
 
-def render_third_run(rows: list[ThirdRunPicture], top: int = 10) -> str:
-    """Whether the third run arbitrates or rubber-stamps, and what that implies."""
+def render_third_run(
+    rows: list[ThirdRunPicture], dist: list[tuple[int, int]] | None = None, top: int = 10
+) -> str:
+    """Whether the third run arbitrates or rubber-stamps, and what that implies.
+
+    `dist` is the LOG-side run distribution, passed in only so this block can say
+    when the two populations disagree. They are different measurements: cost above
+    counts runs in `runs` (from `logs/jsonl/`), agreement here counts runs in
+    `answers` (from `output/`). On the real corpus that is 10,943 merchants with 3
+    log runs against 11,720 records with 3 output runs -- a 777 gap. Printing the
+    two blocks adjacently without saying so invites multiplying a rate from one
+    population by a cost from the other, which is the denominator error
+    `SubqueryPicture` already exists to flag elsewhere.
+    """
     if not rows:
         return "THIRD-RUN VALUE\n  (no answers ingested)"
 
@@ -424,9 +436,36 @@ def render_third_run(rows: list[ThirdRunPicture], top: int = 10) -> str:
     none_maj = sum(r.n_no_majority for r in rows)
     agree = sum(r.n_pairs_agree for r in rows)
 
+    # The record count is the MAX per-question case count, not the mean: a record
+    # missing answers for some questions contributes to fewer than all of them, so
+    # dividing the total by the question count floors it. On the real corpus every
+    # question had 11,720 and the two agree; on a corpus with short runs they do
+    # not, and the mean would silently understate the population.
+    n_records = max(r.n_three for r in rows)
+    uniform = n_three == n_records * len(rows)
     out = [
         "THIRD-RUN VALUE  (can run_2 change the majority run_0+run_1 produced?)",
-        f"  3-run cases        {n_three:,} (merchant, question) pairs",
+        f"  3-run cases        {n_three:,} (record, question) pairs"
+        + (
+            f" = {n_records:,} records x {len(rows)} questions"
+            if uniform
+            else f" over {n_records:,} records (not every record answers all {len(rows)} questions)"
+        ),
+    ]
+    # The populations behind the cost block above and this one are not the same.
+    log_three = next((m for n, m in (dist or []) if n >= 3), 0)
+    if dist and log_three != n_records:
+        out += [
+            f"  POPULATION         {n_records:,} records here (from output/) vs "
+            f"{log_three:,} merchants with",
+            f"                     3 runs above (from logs/jsonl/) — a gap of "
+            f"{abs(n_records - log_three):,}.",
+            "                     Cost above is the LOG side; these rates are the OUTPUT side.",
+            "                     Multiplying one by the other crosses populations; the cost",
+            "                     of a third run is a FLOOR, since runs with answers but no",
+            "                     log carry no tokens.",
+        ]
+    out += [
         f"    redundant        {redundant:,} ({redundant / n_three:.1%}) — first two agreed, "
         f"so run_2 CANNOT change it",
         f"    decisive         {decisive:,} ({decisive / n_three:.1%}) — first two differed, "

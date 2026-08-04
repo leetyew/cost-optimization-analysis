@@ -463,9 +463,10 @@ def cmd_runs(args: argparse.Namespace, cfg: Config) -> int:
     """
     conn = connect(cfg.db)
     try:
-        print(render_run_economics(usage_by_run(conn), run_count_distribution(conn), cfg.pricing))
+        dist = run_count_distribution(conn)
+        print(render_run_economics(usage_by_run(conn), dist, cfg.pricing))
         print()
-        print(render_third_run(third_run_picture(conn, ANSWER_SOURCES[args.answer_source])))
+        print(render_third_run(third_run_picture(conn, ANSWER_SOURCES[args.answer_source]), dist))
         return 0
     finally:
         conn.close()

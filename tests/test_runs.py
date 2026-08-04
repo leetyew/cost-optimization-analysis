@@ -305,3 +305,53 @@ def test_orphan_call_keeps_its_own_run_index(db: sqlite3.Connection) -> None:
     # direction `tier_usage` errs in, because a billed call missing from a cost
     # figure understates it.
     assert by_id[2].cost(PRICED) is not None
+
+
+def test_third_run_block_flags_a_population_mismatch(db: sqlite3.Connection) -> None:
+    """Cost is the log side, agreement the output side — never silently adjacent.
+
+    On the real corpus 10,943 merchants have 3 log runs while 11,720 records have
+    3 output runs. Printing a rate from one population next to a cost from the
+    other invites multiplying them, which is the denominator error the scorecard's
+    SubqueryPicture already guards against elsewhere.
+    """
+    _record(db, 1)
+    _answers(db, 1, 1, ["4", "4", "2"])  # 1 output record with 3 runs
+    for run_id in (0, 1):
+        _run(db, "1", run_id)  # ...but only 2 LOG runs exist
+
+    out = render_third_run(third_run_picture(db, PROSE), run_count_distribution(db))
+    assert "POPULATION" in out
+    assert "crosses populations" in out
+
+
+def test_no_population_warning_when_the_two_agree(db: sqlite3.Connection) -> None:
+    """The warning must be evidence of a real gap, not permanent noise."""
+    _record(db, 1)
+    _answers(db, 1, 1, ["4", "4", "2"])
+    for run_id in (0, 1, 2):
+        _run(db, "1", run_id)
+
+    out = render_third_run(third_run_picture(db, PROSE), run_count_distribution(db))
+    assert "POPULATION" not in out
+
+
+def test_record_count_is_not_derived_by_dividing_by_question_count(
+    db: sqlite3.Connection,
+) -> None:
+    """A record missing answers for some questions must not deflate the population.
+
+    Dividing total cases by the question count floors it whenever coverage is
+    uneven — the fixture corpus reports 431 cases over 48 questions, where the
+    quotient (8) is not the record count at all.
+    """
+    _record(db, 1)
+    _record(db, 2)
+    _answers(db, 1, 1, ["4", "4", "2"])  # record 1 answers q1 and q2
+    _answers(db, 1, 2, ["4", "4", "2"])
+    _answers(db, 2, 1, ["4", "4", "2"])  # record 2 answers only q1
+
+    out = render_third_run(third_run_picture(db, PROSE))
+    assert "3-run cases        3 (record, question) pairs" in out
+    assert "over 2 records" in out, "2 records, not 3//2 = 1"
+    assert "not every record answers all" in out
