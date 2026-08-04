@@ -274,3 +274,23 @@ def test_run_reconciliation_is_quiet_when_the_sides_agree(conn: sqlite3.Connecti
         "INSERT INTO runs (se10, run_id, run_key, src_file, src_line) VALUES ('m',0,'run_0','x',1)"
     )
     assert "identical run sets" in health_report(conn)
+
+
+def test_run_reconciliation_names_the_runs_it_had_to_exclude(conn: sqlite3.Connection) -> None:
+    """A NULL run_id has no join key, so it is excluded — but silently it contradicts.
+
+    The `runs` line directly above counts every run; this one can only count runs
+    with a parseable run_id. Left unlabelled the block reads `runs 60` then
+    `59 / 69`, which the operator cannot investigate from a pasted screen.
+    """
+    conn.execute("INSERT INTO output_records (id, se10, src_file, src_line) VALUES (1,'m','x',1)")
+    conn.execute(
+        "INSERT INTO answers (se10, output_id, run_id, qnum, answer_text) VALUES ('m',1,0,1,'3')"
+    )
+    conn.executemany(
+        "INSERT INTO runs (se10, run_id, run_key, src_file, src_line) VALUES ('m',?,?,'x',1)",
+        [(0, "run_0"), (None, "retry_final")],  # one parseable, one not
+    )
+    out = health_report(conn)
+    assert "runs                   2" in out, "the runs line counts both"
+    assert "1 / 1 [excl. 1 unparsed run key(s)]" in out, "this line must say why it counts one"

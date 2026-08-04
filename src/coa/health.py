@@ -307,6 +307,12 @@ def _run_reconciliation_lines(conn: sqlite3.Connection) -> list[str]:
     Compared on `(se10, run_id)`. A duplicated se10 stored as two output records
     collapses to one here on purpose: the log side is keyed by se10 and knows
     nothing of the duplicate, so counting it twice would invent a mismatch.
+
+    A run whose key did not parse (`RUN_KEY_UNPARSED`) has a NULL `run_id` and no
+    join key, so it cannot appear on either side and is excluded. That makes the
+    log count here smaller than the `runs` line directly above it, which reads as
+    a contradiction in a block the operator cannot investigate — so the exclusion
+    is named whenever it is non-zero rather than left to be noticed.
     """
     row = conn.execute(
         """
@@ -333,7 +339,11 @@ def _run_reconciliation_lines(conn: sqlite3.Connection) -> list[str]:
         if row["out_only"] or row["log_only"]
         else "identical run sets"
     )
-    return [_line("runs log vs output", f"{row['n_log']:,} / {row['n_out']:,} — {detail}")]
+    unparsed = _scalar(conn, "SELECT COUNT(*) FROM runs WHERE run_id IS NULL")
+    excluded = f" [excl. {unparsed:,} unparsed run key(s)]" if unparsed else ""
+    return [
+        _line("runs log vs output", f"{row['n_log']:,} / {row['n_out']:,}{excluded} — {detail}")
+    ]
 
 
 def _answer_source_lines(conn: sqlite3.Connection, n_a: int) -> list[str]:
