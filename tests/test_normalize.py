@@ -27,6 +27,7 @@ from coa.normalize import (
     build_template,
     export_head,
     load_archetype_groups,
+    masking_diagnostic,
     template_queries,
     templating_picture,
 )
@@ -389,3 +390,49 @@ def test_doctor_reports_templating_coverage_and_unmasked_count(
     # while its pii_terms bucket is populated means templating is not reaching it.
     assert "placeholders" in out
     assert len(out.splitlines()) < 90, "doctor output must stay one screen"
+
+
+# ---------------------------------------------------------------------------
+# Masking diagnostic — generic query vs PII we failed to match
+# ---------------------------------------------------------------------------
+
+
+def test_near_miss_fires_on_a_partial_name(bare_db: sqlite3.Connection, tmp_path) -> None:
+    """The detector must FIRE, not just return 0 on a corpus that has no misses.
+
+    `acme widgets llc` is stored whole, so a query saying `Acme Widgets reviews`
+    matches no term and comes back unmasked — yet it plainly contains the
+    merchant. That is a pii_terms variant to add, and it is the failure the real
+    corpus's 89%-singleton head is suspected of.
+    """
+    bare_db.executemany(
+        "INSERT INTO pii_terms (se10, field, value_norm) VALUES ('9999999999', ?, ?)",
+        [("name", "acme widgets llc"), ("city", "springfield")],
+    )
+    _query_row(bare_db, "9999999999", "Acme Widgets reviews")  # near miss
+    _query_row(bare_db, "9999999999", "BBB complaints database")  # genuinely generic
+    rec = anom.AnomalyRecorder(bare_db, "analyze")
+    template_queries(bare_db, rec, Config(archetype_groups=tmp_path / "absent.csv"))
+
+    d = masking_diagnostic(bare_db)
+    assert d.n_unmasked == 2
+    assert d.n_near_miss == 1, "the partial-name query must be flagged"
+    assert d.near_miss_by_field == [("name", 1)]
+    assert d.near_miss_rate == 0.5
+
+
+def test_generic_queries_collapse_and_missed_pii_does_not(corpus, tmp_path) -> None:
+    """The fingerprint the whole diagnostic rests on, measured on the corpus.
+
+    Fixture masking is complete, so its unmasked queries are the planted generic
+    ones — they must collapse to very few templates. If this ratio ever
+    approached 1.0 here it would mean the fixture had developed a masking gap.
+    """
+    rec = anom.AnomalyRecorder(corpus.conn, "analyze")
+    template_queries(corpus.conn, rec, CFG)
+    d = masking_diagnostic(corpus.conn)
+
+    by_kind = {k: (q, t) for k, q, t in d.by_kind}
+    q_unmasked, t_unmasked = by_kind["unmasked"]
+    assert q_unmasked / t_unmasked > 5, "generic queries must collapse"
+    assert d.n_near_miss == 0, "fixture masking is complete, so nothing should near-miss"

@@ -43,7 +43,9 @@ from .metrics import (
 from .normalize import (
     counters,
     export_head,
+    masking_diagnostic,
     render_export_note,
+    render_masking_diagnostic,
     render_templating_report,
     template_queries,
     templating_picture,
@@ -416,6 +418,8 @@ def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
         print(counters(stats.items()))
         print()
         print(render_templating_report(templating_picture(conn), cfg))
+        print()
+        print(render_masking_diagnostic(masking_diagnostic(conn)))
 
         if args.export_templates:
             dest = (

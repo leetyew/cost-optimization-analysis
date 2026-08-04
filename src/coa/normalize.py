@@ -30,6 +30,7 @@ analysis pass over what ingest already stored, so there is no file to stream.
 from __future__ import annotations
 
 import csv
+import re
 import sqlite3
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -380,6 +381,128 @@ def export_head(
             writer.writerow((r["template"], r["n_billed_calls"], r["n_merchants"], r["archetype"]))
 
     return len(rows), (0 if include_unmasked else withheld)
+
+
+@dataclass(frozen=True)
+class MaskingDiagnostic:
+    """Why a template failed to collapse: generic query, or PII we did not match.
+
+    Two causes that look identical in the totals and need opposite fixes, so both
+    are measured here rather than left to an eyeball pass over query text — which
+    cannot leave the air-gapped environment in the first place.
+    """
+
+    by_kind: list[tuple[str, int, int]]  # (masked|unmasked, queries, distinct templates)
+    n_unmasked: int
+    n_near_miss: int
+    near_miss_by_field: list[tuple[str, int]]
+
+    @property
+    def near_miss_rate(self) -> float | None:
+        return self.n_near_miss / self.n_unmasked if self.n_unmasked else None
+
+
+# A PII value's individual words, for near-miss detection. Four chars rather than
+# `MIN_TERM_CHARS`'s three: at three, `llc` / `inc` / `ave` hit half the corpus and
+# the signal drowns. Still a HEURISTIC, and labelled as one wherever it prints —
+# `blue` from "Blue Harbor" also matches "blue book value".
+_NEAR_MISS_MIN_CHARS = 4
+
+
+def masking_diagnostic(conn: sqlite3.Connection) -> MaskingDiagnostic:
+    """Separate "no PII to mask" from "PII we failed to match".
+
+    The distinguishing fingerprint is **collapse**. A genuinely generic query is
+    issued by every merchant, so it is the most-shared text in the corpus and its
+    distinct-template count stays tiny. PII we missed is unique per merchant, so
+    it collapses with nothing. Comparing queries against distinct templates inside
+    each bucket answers it without reading a single query.
+
+    The near-miss pass then localizes the fix: does an unmasked query contain a
+    WORD from one of its own merchant's `pii_terms` values? A hit means the value
+    is there in a form the whole-value substring match could not see — `Acme
+    Widgets` against a stored `acme widgets llc` — which is a `pii_terms` variant
+    to add, not a generic query.
+    """
+    by_kind = [
+        (r["kind"], r["queries"], r["templates"])
+        for r in conn.execute(
+            "SELECT CASE WHEN n_placeholders = 0 THEN 'unmasked' ELSE 'masked' END AS kind, "
+            "COUNT(*) AS queries, COUNT(DISTINCT template) AS templates "
+            "FROM query_instances WHERE is_billed_query = 1 AND template IS NOT NULL "
+            "GROUP BY 1 ORDER BY 1"
+        )
+    ]
+
+    # Walked merchant by merchant, like the templating pass itself, so a query is
+    # only ever compared against its own merchant's words.
+    near_miss: Counter = Counter()
+    n_unmasked = n_near_miss = 0
+    for se10 in [r[0] for r in conn.execute("SELECT DISTINCT se10 FROM query_instances")]:
+        words: dict[str, set[str]] = {}
+        for r in conn.execute("SELECT field, value_norm FROM pii_terms WHERE se10 = ?", (se10,)):
+            for word in re.split(r"[^0-9a-z]+", r["value_norm"]):
+                if len(word) >= _NEAR_MISS_MIN_CHARS:
+                    words.setdefault(word, set()).add(r["field"])
+        if not words:
+            continue
+        for row in conn.execute(
+            "SELECT template FROM query_instances "
+            "WHERE se10 IS ? AND is_billed_query = 1 AND n_placeholders = 0",
+            (se10,),
+        ).fetchall():
+            n_unmasked += 1
+            hit = {f for word, fields in words.items() if word in row["template"] for f in fields}
+            if hit:
+                n_near_miss += 1
+                for field in hit:
+                    near_miss[field] += 1
+
+    return MaskingDiagnostic(
+        by_kind=by_kind,
+        n_unmasked=n_unmasked,
+        n_near_miss=n_near_miss,
+        near_miss_by_field=sorted(near_miss.items(), key=lambda kv: (-kv[1], kv[0])),
+    )
+
+
+def render_masking_diagnostic(d: MaskingDiagnostic) -> str:
+    """Format the diagnostic, naming the fix each shape implies."""
+    if not d.by_kind:
+        return "MASKING DIAGNOSTIC\n  (nothing templated yet — run `coa analyze`)"
+
+    out = [
+        "MASKING DIAGNOSTIC  (is an unmasked query generic, or PII we missed?)",
+        f"    {'':<10}{'queries':>12}{'templates':>12}{'q/template':>13}",
+    ]
+    for kind, queries, templates in d.by_kind:
+        ratio = f"{queries / templates:.1f}" if templates else "n/a"
+        out.append(f"    {kind:<10}{queries:>12,}{templates:>12,}{ratio:>13}")
+    out += [
+        "    A generic query is issued by EVERY merchant, so it collapses hard and its",
+        "    q/template runs high. PII we missed is unique per merchant and sits near 1.0.",
+        "",
+    ]
+    if not d.n_unmasked:
+        out.append("  near-miss          (no unmasked queries to check)")
+        return "\n".join(out)
+
+    out.append(
+        f"  near-miss          {d.n_near_miss:,} of {d.n_unmasked:,} unmasked queries "
+        f"({d.near_miss_rate:.1%})"
+    )
+    if d.near_miss_by_field:
+        out.append(
+            "    by field         " + ", ".join(f"{f} {n:,}" for f, n in d.near_miss_by_field)
+        )
+    out += [
+        "    A near miss contains a WORD from its own merchant's pii_terms while matching",
+        "    no whole value — `Acme Widgets` against a stored `acme widgets llc`. Those are",
+        "    pii_terms variants to add, NOT generic queries.",
+        "    HEURISTIC: a 4+ char word can collide by chance (`blue` from `Blue Harbor` also",
+        "    matches `blue book value`), so read this as an UPPER bound on the miss rate.",
+    ]
+    return "\n".join(out)
 
 
 def _pct(value: float | None) -> str:
